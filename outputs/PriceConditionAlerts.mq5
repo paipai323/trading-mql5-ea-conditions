@@ -1,5 +1,5 @@
 #property strict
-#property version "1.21"
+#property version "1.22"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -171,6 +171,20 @@ struct DraftCondition
 DraftCondition draft[];
 bool paused=true;
 string savedFile="";
+bool WriteDraftText(int handle,string value)
+{
+   int length=StringLen(value);
+   return length<=4096 && FileWriteInteger(handle,length,INT_VALUE)==4 &&
+          FileWriteString(handle,value,length)==(uint)(length*2);
+}
+bool ReadDraftText(int handle,string &value)
+{
+   if(FileTell(handle)+4>FileSize(handle)) return false;
+   int length=FileReadInteger(handle,INT_VALUE);
+   if(length<0 || length>4096 || FileTell(handle)+(ulong)length*2>FileSize(handle)) return false;
+   value=length==0 ? "" : FileReadString(handle,length);
+   return StringLen(value)==length;
+}
 string ruleCodes[]={"ZONE_ENTER","ZONE_TOUCH","TRADED_ABOVE","TRADED_BELOW",
    "SWEEP_ABOVE_REJECT","SWEEP_BELOW_RECLAIM","CLOSE_ABOVE","CLOSE_BELOW",
    "CROSS_ABOVE","CROSS_BELOW","CLOSE_IN_ZONE"};
@@ -770,6 +784,62 @@ protected:
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
    CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; m_scroll_blocked=false; m_previous_scroll=true; m_trade_draft=false; }
+   void SaveDraftState()
+   {
+      if(!m_ready || savedFile=="") return;
+      Capture();
+      string filename=savedFile+".draft",temporary=filename+".tmp";
+      int handle=FileOpen(temporary,FILE_WRITE|FILE_BIN|FILE_UNICODE);
+      if(handle==INVALID_HANDLE) { Print("Cannot save draft: ",GetLastError()); return; }
+      bool ok=FileWriteInteger(handle,1)==4 && FileWriteInteger(handle,ArraySize(draft))==4 &&
+              FileWriteInteger(handle,m_selected)==4 && FileWriteInteger(handle,(int)m_trade_side.Value())==4 &&
+              FileWriteInteger(handle,(int)m_lot_mode.Value())==4;
+      ok=ok && WriteDraftText(handle,m_trade_sl.Text()) && WriteDraftText(handle,m_trade_tp.Text()) &&
+               WriteDraftText(handle,m_trade_entry.Text()) && WriteDraftText(handle,m_manual_lots.Text());
+      for(int i=0;ok && i<ArraySize(draft);i++)
+         ok=WriteDraftText(handle,draft[i].rule) && FileWriteInteger(handle,draft[i].live ? 1 : 0)==4 &&
+            FileWriteInteger(handle,(int)draft[i].timeframe)==4 && WriteDraftText(handle,draft[i].level) &&
+            WriteDraftText(handle,draft[i].low) && WriteDraftText(handle,draft[i].high);
+      FileFlush(handle); FileClose(handle);
+      if(!ok || !FileMove(temporary,0,filename,FILE_REWRITE)) Print("Could not finish saving draft: ",GetLastError());
+   }
+   void RestoreDraftState()
+   {
+      string filename=savedFile+".draft";
+      if(!FileIsExist(filename)) return;
+      int handle=FileOpen(filename,FILE_READ|FILE_BIN|FILE_UNICODE);
+      if(handle==INVALID_HANDLE) { Print("Cannot restore draft: ",GetLastError()); return; }
+      bool ok=FileSize(handle)>=20 && FileSize(handle)<=16777216;
+      int version=FileReadInteger(handle),count=FileReadInteger(handle),selected=FileReadInteger(handle);
+      int side=FileReadInteger(handle),lotMode=FileReadInteger(handle);
+      ok=ok && version==1 && count>=0 && count<=100000 && side>=0 && side<=5 && (lotMode==0 || lotMode==1);
+      string sl="",tp="",entry="",lots="";
+      ok=ok && ReadDraftText(handle,sl) && ReadDraftText(handle,tp) && ReadDraftText(handle,entry) && ReadDraftText(handle,lots);
+      DraftCondition restored[];
+      if(ok) ok=ArrayResize(restored,count)==count;
+      for(int i=0;ok && i<count;i++)
+      {
+         ok=ReadDraftText(handle,restored[i].rule) && FileTell(handle)+8<=FileSize(handle);
+         if(!ok) break;
+         int live=FileReadInteger(handle),tf=FileReadInteger(handle);
+         bool knownTF=false;
+         for(int t=0;t<ArraySize(tfValues);t++) if((int)tfValues[t]==tf) knownTF=true;
+         restored[i].live=live==1; restored[i].timeframe=(ENUM_TIMEFRAMES)tf;
+         ok=KnownRule(restored[i].rule) && (live==0 || live==1) && knownTF &&
+            ReadDraftText(handle,restored[i].level) && ReadDraftText(handle,restored[i].low) && ReadDraftText(handle,restored[i].high);
+      }
+      ok=ok && FileTell(handle)==FileSize(handle); FileClose(handle);
+      if(!ok) { Print("Invalid draft snapshot; keeping applied settings."); return; }
+      if(ArrayResize(draft,count)!=count) { Print("Not enough memory to restore draft."); return; }
+      for(int i=0;i<count;i++) draft[i]=restored[i];
+      m_selected=selected; m_trade_side.SelectByValue(side); m_lot_mode.SelectByValue(lotMode);
+      m_trade_sl.Text(sl); m_trade_tp.Text(tp); m_trade_entry.Text(entry); m_manual_lots.Text(lots);
+      if(PendingOrder((ENUM_ORDER_TYPE)side)) m_trade_entry.Enable(); else m_trade_entry.Disable();
+      if(lotMode==1) m_manual_lots.Enable(); else m_manual_lots.Disable();
+      m_trade_draft=false; autoEntry=false;
+      FormMessage="Draft restored. Review then Apply & Restart. Auto entry OFF.";
+      RefreshList();
+   }
    void HandleChartResize()
    {
       SubwinOff();
@@ -1243,12 +1313,13 @@ int OnInit()
    }
    if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,679) || !panel.Run())
    { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
+   panel.RestoreDraftState();
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_WHEEL,true);
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_MOVE,true);
    Print("On-chart editor ready for ",_Symbol,". Monitoring paused; automatic entry OFF.");
    return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reason); panel.RestoreChartScroll(); Comment(""); }
+void OnDeinit(const int reason) { if(reason!=REASON_INITFAILED) panel.SaveDraftState(); panel.ClearZonePreviews(); panel.Destroy(reason); panel.RestoreChartScroll(); Comment(""); }
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
 {
    if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.03"
+#property version "1.06"
 #property description "On-chart condition editor. Alerts only; no order operations."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -247,13 +247,90 @@ void Notify(double price)
 class CConditionPanel : public CAppDialog
 {
 private:
-   CComboBox m_condition,m_rule,m_mode,m_timeframe;
+   CListView m_condition;
+   CComboBox m_rule,m_mode,m_timeframe,m_pick_target;
+   CButton m_list_toggle;
+   bool m_list_expanded;
    CEdit m_level,m_low,m_high;
-   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import,m_drawing;
+   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import,m_drawing,m_pick;
    CLabel m_select_label,m_rule_label,m_mode_label,m_tf_label;
    CLabel m_level_label,m_low_label,m_high_label,m_help,m_status,m_message;
    int m_selected;
    bool m_ready;
+   bool m_picking;
+   int m_pick_field;
+   void ShiftEditor(int dy)
+   {
+      m_add.Shift(0,dy); m_remove.Shift(0,dy); m_up.Shift(0,dy); m_down.Shift(0,dy);
+      m_import.Shift(0,dy); m_rule_label.Shift(0,dy); m_rule.Shift(0,dy);
+      m_mode_label.Shift(0,dy); m_tf_label.Shift(0,dy); m_mode.Shift(0,dy); m_timeframe.Shift(0,dy);
+      m_level_label.Shift(0,dy); m_low_label.Shift(0,dy); m_high_label.Shift(0,dy);
+      m_level.Shift(0,dy); m_low.Shift(0,dy); m_high.Shift(0,dy); m_help.Shift(0,dy);
+      m_drawing.Shift(0,dy); m_pick_target.Shift(0,dy); m_pick.Shift(0,dy);
+      m_apply.Shift(0,dy); m_pause.Shift(0,dy); m_status.Shift(0,dy); m_message.Shift(0,dy);
+   }
+   void OnListToggle()
+   {
+      CancelPick(); m_list_expanded=!m_list_expanded;
+      int dy=m_list_expanded ? 110 : -110;
+      // Resize the dialog and its normal rectangle, including after minimizing.
+      if(m_list_expanded) Height(Height()+dy);
+      ShiftEditor(dy);
+      if(!m_list_expanded) Height(Height()+dy);
+      m_norm_rect.Height(Height());
+      if(m_list_expanded) m_condition.Show(); else m_condition.Hide();
+      m_list_toggle.Text((m_list_expanded ? "- Hide conditions (" : "+ Show conditions (")+
+                         IntegerToString(ArraySize(draft))+")");
+      ChartRedraw();
+   }
+   bool ScrollList(CListView &list,int x,int y,int delta)
+   {
+      if(!list.IsVisible() || !list.Contains(x,y)) return false;
+      for(int j=0;j<list.ControlsTotal();j++)
+      {
+         CScrollV *scroll=dynamic_cast<CScrollV *>(list.Control(j));
+         if(scroll==NULL || !scroll.IsVisible()) continue;
+         int steps=MathMax(1,MathAbs(delta)/120),direction=delta>0 ? -1 : 1;
+         for(int k=0;k<steps;k++)
+         {
+            if(!scroll.CurrPos(scroll.CurrPos()+direction)) continue;
+            long scrollId=scroll.Id(); double unused=0.0; string scrollName=scroll.Name();
+            list.OnEvent(CHARTEVENT_CUSTOM+(direction>0 ? ON_SCROLL_INC : ON_SCROLL_DEC),
+                         scrollId,unused,scrollName);
+         }
+         break;
+      }
+      ChartRedraw(); return true;
+   }
+   bool ScrollDropdown(CComboBox &combo,int x,int y,int delta)
+   {
+      for(int i=0;i<combo.ControlsTotal();i++)
+      {
+         CListView *list=dynamic_cast<CListView *>(combo.Control(i));
+         if(list==NULL || !list.IsVisible() || !list.Contains(x,y)) continue;
+         for(int j=0;j<list.ControlsTotal();j++)
+         {
+            CScrollV *scroll=dynamic_cast<CScrollV *>(list.Control(j));
+            if(scroll==NULL || !scroll.IsVisible()) continue;
+            int steps=MathMax(1,MathAbs(delta)/120);
+            int direction=delta>0 ? -1 : 1;
+            for(int k=0;k<steps;k++)
+            {
+               if(scroll.CurrPos(scroll.CurrPos()+direction))
+               {
+                  long scrollId=scroll.Id(); double unused=0.0; string scrollName=scroll.Name();
+                  list.OnEvent(CHARTEVENT_CUSTOM+(direction>0 ? ON_SCROLL_INC : ON_SCROLL_DEC),
+                               scrollId,unused,scrollName);
+               }
+            }
+            break;
+         }
+         ChartRedraw(); return true;
+      }
+      return false;
+   }
+   void CancelPick()
+   { m_picking=false; m_pick.Text("Pick price"); }
    bool Combo(CComboBox &control,string suffix,int x,int y,int width)
    { return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+24) && Add(control); }
    bool Edit(CEdit &control,string suffix,int x,int y,int width)
@@ -291,10 +368,11 @@ private:
          m_rule.Disable(); m_mode.Disable(); m_timeframe.Disable();
          m_level.Disable(); m_low.Disable(); m_high.Disable();
          m_remove.Disable(); m_up.Disable(); m_down.Disable(); m_drawing.Disable();
+         m_pick_target.Disable(); m_pick.Disable(); CancelPick();
          m_level.Text(""); m_low.Text(""); m_high.Text("");
          m_help.Text("Click Add condition to begin."); return;
       }
-      m_rule.Enable(); m_remove.Enable(); m_drawing.Enable();
+      m_rule.Enable(); m_remove.Enable(); m_drawing.Enable(); m_pick.Enable(); m_pick_target.Enable();
       for(int i=0;i<ArraySize(ruleCodes);i++)
          if(ruleCodes[i]==draft[m_selected].rule) { m_rule.SelectByValue(i); break; }
       if(CandleOnly(draft[m_selected].rule)) draft[m_selected].live=false;
@@ -306,6 +384,14 @@ private:
       if(CandleOnly(draft[m_selected].rule)) m_mode.Disable(); else m_mode.Enable();
       if(draft[m_selected].live) m_timeframe.Disable(); else m_timeframe.Enable();
       bool zone=ZoneRule(draft[m_selected].rule);
+      m_pick_target.ItemsClear();
+      if(zone)
+      {
+         m_pick_target.AddItem("Zone low",1); m_pick_target.AddItem("Zone high",2);
+         if(m_pick_field==0) m_pick_field=1;
+      }
+      else { m_pick_target.AddItem("Price level",0); m_pick_field=0; }
+      m_pick_target.SelectByValue(m_pick_field);
       if(zone) { m_level.Disable(); m_low.Enable(); m_high.Enable(); }
       else { m_level.Enable(); m_low.Disable(); m_high.Disable(); }
       if(m_selected>0) m_up.Enable(); else m_up.Disable();
@@ -334,20 +420,23 @@ private:
          }
          m_condition.SelectByValue(m_selected);
       }
+      if(!m_list_expanded) m_condition.Hide();
+      m_list_toggle.Text((m_list_expanded ? "- Hide conditions (" : "+ Show conditions (")+
+                         IntegerToString(count)+")");
       Fields(); UpdateStatus(); ChartRedraw();
    }
    void OnSelect()
    {
       int selection=(int)m_condition.Value();
       if(selection==m_selected || selection<0 || selection>=ArraySize(draft)) return;
-      Capture(); m_selected=selection; Fields(); ChartRedraw();
+      CancelPick(); Capture(); m_selected=selection; Fields(); ChartRedraw();
    }
    void OnRule()
    {
       if(m_selected<0) return;
       int r=(int)m_rule.Value();
       if(r<0 || r>=ArraySize(ruleCodes) || draft[m_selected].rule==ruleCodes[r]) return;
-      Capture(); Dirty(); RefreshList();
+      CancelPick(); Capture(); Dirty(); RefreshList();
    }
    void OnMode()
    {
@@ -370,7 +459,7 @@ private:
    }
    void OnAdd()
    {
-      Capture(); int count=ArraySize(draft);
+      CancelPick(); Capture(); int count=ArraySize(draft);
       if(ArrayResize(draft,count+1)!=count+1) { FormMessage="Not enough memory to add a condition."; UpdateStatus(); return; }
       draft[count].rule="ZONE_ENTER"; draft[count].live=true; draft[count].timeframe=PERIOD_H1;
       draft[count].level=""; draft[count].low=""; draft[count].high="";
@@ -379,6 +468,7 @@ private:
    void OnRemove()
    {
       if(m_selected<0) return;
+      CancelPick();
       int count=ArraySize(draft);
       for(int i=m_selected;i<count-1;i++) draft[i]=draft[i+1];
       ArrayResize(draft,count-1);
@@ -388,7 +478,7 @@ private:
    {
       int target=m_selected+direction;
       if(m_selected<0 || target<0 || target>=ArraySize(draft)) return;
-      Capture(); DraftCondition temp=draft[m_selected];
+      CancelPick(); Capture(); DraftCondition temp=draft[m_selected];
       draft[m_selected]=draft[target]; draft[target]=temp; m_selected=target;
       Dirty(); RefreshList();
    }
@@ -396,7 +486,7 @@ private:
    void OnDown() { Move(1); }
    void OnApply()
    {
-      Capture(); Condition candidate[];
+      CancelPick(); Capture(); Condition candidate[];
       if(!ValidateDraft(candidate) || !SaveConditions(candidate)) { UpdateStatus(); return; }
       if(ArrayResize(conditions,ArraySize(candidate))!=ArraySize(candidate))
       { FormMessage="Not enough memory to start monitoring."; UpdateStatus(); return; }
@@ -406,6 +496,7 @@ private:
    }
    void OnPause()
    {
+      CancelPick();
       if(!paused && !finished)
       { paused=true; FormMessage="Paused. Resume restarts at condition 1; missed prices are not replayed."; }
       else if(ArraySize(conditions)>0)
@@ -415,6 +506,7 @@ private:
    }
    void OnImport()
    {
+      CancelPick();
       Condition imported[];
       if(!LoadConditions(ConditionsFile,imported)) { UpdateStatus(); return; }
       CopyToDraft(imported); m_selected=0;
@@ -423,6 +515,7 @@ private:
    void OnDrawing()
    {
       if(m_selected<0) return;
+      CancelPick();
       Capture(); bool zone=ZoneRule(draft[m_selected].rule);
       string chosen=""; int matches=0;
       int total=ObjectsTotal(m_chart_id,0,-1);
@@ -448,18 +541,79 @@ private:
       else draft[m_selected].level=DoubleToString(first,_Digits);
       Fields(); FormMessage="Copied drawing prices into draft. Apply to use them."; UpdateStatus();
    }
+   void OnPickTarget()
+   {
+      int target=(int)m_pick_target.Value();
+      if(target==m_pick_field || target<0 || target>2) return;
+      CancelPick(); m_pick_field=target;
+      FormMessage="Choose Pick price, then click the main chart."; UpdateStatus();
+   }
+   void OnPick()
+   {
+      if(m_selected<0) return;
+      Capture();
+      if(m_picking)
+      { CancelPick(); FormMessage="Price picking cancelled."; UpdateStatus(); return; }
+      m_pick_field=(int)m_pick_target.Value();
+      m_picking=true; m_pick.Text("Cancel pick");
+      string field=m_pick_field==0 ? "price level" : (m_pick_field==1 ? "zone low" : "zone high");
+      FormMessage="Click the main chart to set "+field+". Esc cancels.";
+      UpdateStatus();
+   }
 protected:
    virtual void OnClickButtonClose(void) { Minimize(); }
    virtual void OnClickButtonMinMax(void)
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
-   CConditionPanel() { m_selected=-1; m_ready=false; }
+   CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; }
+   bool HandlePriceClick(int x,int y)
+   {
+      if(!m_picking) return false;
+      // Clicks on the panel must never be interpreted as chart prices.
+      if(x>=Left() && x<=Right() && y>=Top() && y<=Bottom()) return false;
+      if(m_selected<0 || m_selected>=ArraySize(draft)) { CancelPick(); return true; }
+      int window=0; datetime time=0; double price=0;
+      if(!ChartXYToTimePrice(m_chart_id,x,y,window,time,price) || window!=0 ||
+         !MathIsValidNumber(price) || price<=0)
+      {
+         FormMessage="Click the main price chart, outside the panel. Esc cancels.";
+         UpdateStatus(); return true;
+      }
+      double tick_size=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(tick_size>0) price=MathRound(price/tick_size)*tick_size;
+      price=NormalizeDouble(price,_Digits);
+      if(price<=0) return true;
+      string value=DoubleToString(price,_Digits);
+      Capture();
+      if(m_pick_field==0) draft[m_selected].level=value;
+      else if(m_pick_field==1) draft[m_selected].low=value;
+      else draft[m_selected].high=value;
+      CancelPick(); Fields();
+      FormMessage="Copied "+value+" into draft. Apply & Restart to use it.";
+      UpdateStatus(); return true;
+   }
+   bool HandleEscape()
+   {
+      if(!m_picking) return false;
+      CancelPick(); FormMessage="Price picking cancelled."; UpdateStatus(); return true;
+   }
+   bool HandleWheel(const long packed,const double delta)
+   {
+      if(delta==0) return false;
+      int x=(int)(short)packed,y=(int)(short)(packed>>16);
+      return ScrollDropdown(m_rule,x,y,(int)delta) ||
+             ScrollDropdown(m_mode,x,y,(int)delta) ||
+             ScrollDropdown(m_timeframe,x,y,(int)delta) ||
+             ScrollDropdown(m_pick_target,x,y,(int)delta) || ScrollList(m_condition,x,y,(int)delta);
+   }
    virtual bool Create(const long chart,const string name,const int subwin,
                        const int x1,const int y1,const int x2,const int y2)
    {
       if(!CAppDialog::Create(chart,name,subwin,x1,y1,x2,y2)) return false;
-      if(!Label(m_select_label,"SelectLabel","Condition list (edit one condition at a time)",12,10,550) ||
-         !Combo(m_condition,"Condition",12,32,550) ||
+      if(!m_condition.TotalView(5) ||
+         !m_condition.Create(chart,name+"ConditionList",subwin,12,42,562,144) || !Add(m_condition)) return false;
+      if(!Button(m_list_toggle,"ListToggle","- Hide conditions",12,8,270) ||
+         !Label(m_select_label,"SelectLabel","Click a condition to edit it",300,12,262) ||
          !Button(m_add,"Add","+ Add",12,66,94) ||
          !Button(m_remove,"Remove","Remove",114,66,94) ||
          !Button(m_up,"Up","Move up",216,66,94) ||
@@ -479,11 +633,14 @@ public:
          !Edit(m_high,"High",388,242,174) ||
          !Label(m_help,"Help","",12,276,550) ||
          !Button(m_drawing,"Drawing","Use selected line / rectangle",12,302,270) ||
+         !Combo(m_pick_target,"PickTarget",300,302,156) ||
+         !Button(m_pick,"Pick","Pick price",464,302,98) ||
          !Button(m_apply,"Apply","Apply & Restart",12,342,270) ||
          !Button(m_pause,"Pause","Resume & Restart",300,342,262) ||
          !Label(m_status,"Status","",12,380,550) ||
          !Label(m_message,"Message","",12,405,550)) return false;
-      m_condition.ListViewItems(6); m_rule.ListViewItems(6);
+      m_list_expanded=true; Height(Height()+110); m_norm_rect.Height(Height()); ShiftEditor(110);
+      m_rule.ListViewItems(6);
       for(int i=0;i<ArraySize(ruleCodes);i++) if(!m_rule.AddItem(ruleNames[i],i)) return false;
       if(!m_mode.AddItem("Live Bid",0) || !m_mode.AddItem("Completed candle",1)) return false;
       for(int i=0;i<ArraySize(tfValues);i++) if(!m_timeframe.AddItem(tfNames[i],i)) return false;
@@ -505,10 +662,12 @@ public:
    virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 };
 EVENT_MAP_BEGIN(CConditionPanel)
+   ON_EVENT(ON_CLICK,m_list_toggle,OnListToggle)
    ON_EVENT(ON_CHANGE,m_condition,OnSelect)
    ON_EVENT(ON_CHANGE,m_rule,OnRule)
    ON_EVENT(ON_CHANGE,m_mode,OnMode)
    ON_EVENT(ON_CHANGE,m_timeframe,OnTimeframe)
+   ON_EVENT(ON_CHANGE,m_pick_target,OnPickTarget)
    ON_EVENT(ON_END_EDIT,m_level,OnEdit)
    ON_EVENT(ON_END_EDIT,m_low,OnEdit)
    ON_EVENT(ON_END_EDIT,m_high,OnEdit)
@@ -520,6 +679,7 @@ EVENT_MAP_BEGIN(CConditionPanel)
    ON_EVENT(ON_CLICK,m_pause,OnPause)
    ON_EVENT(ON_CLICK,m_import,OnImport)
    ON_EVENT(ON_CLICK,m_drawing,OnDrawing)
+   ON_EVENT(ON_CLICK,m_pick,OnPick)
 EVENT_MAP_END(CAppDialog)
 CConditionPanel panel;
 int OnInit()
@@ -548,12 +708,18 @@ int OnInit()
    }
    if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,505) || !panel.Run())
    { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
+   ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_WHEEL,true);
    Print("On-chart editor ready for ",_Symbol,". Monitoring paused; no orders will be sent.");
    return INIT_SUCCEEDED;
 }
 void OnDeinit(const int reason) { panel.Destroy(reason); Comment(""); }
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
-{ panel.ChartEvent(id,lparam,dparam,sparam); }
+{
+   if(id==CHARTEVENT_MOUSE_WHEEL && panel.HandleWheel(lparam,dparam)) return;
+   if(id==CHARTEVENT_CLICK && panel.HandlePriceClick((int)lparam,(int)dparam)) return;
+   if(id==CHARTEVENT_KEYDOWN && lparam==27 && panel.HandleEscape()) return;
+   panel.ChartEvent(id,lparam,dparam,sparam);
+}
 void OnTick()
 {
    if(paused || finished || ArraySize(conditions)==0) return;

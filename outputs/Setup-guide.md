@@ -6,7 +6,7 @@ PriceConditionAlerts has a condition editor directly on the MT5 chart. It never 
 
 1. Copy the updated PriceConditionAlerts.ex5 into desktop MT5's data folder > MQL5 > Experts. Remove the previous instance, refresh Navigator, and attach the updated EA to your exact symbol. You can alternatively compile the source in MetaEditor.
 2. The chart panel opens paused. No configuration file is required. Click + Add, select a rule, choose live Bid or completed candles, and enter a level or zone. For candle rules choose a timeframe.
-3. Add more conditions. Use the condition-list dropdown to select the condition to edit; Move up/down changes its order and Remove deletes it. The editor shows one condition at a time, without limiting list length.
+3. Add more conditions. Click a row in the expanded condition list to edit that condition; Move up/down changes its order and Remove deletes it. The selected row is highlighted. Use Hide conditions / Show conditions to collapse or expand the list. Longer lists have a scrollbar and support mouse-wheel scrolling while hovering over the list. The editor shows one condition at a time, without limiting list length. Rule and other dropdowns also support wheel scrolling while open.
 4. Click Apply & Restart. All draft conditions are validated and saved automatically, then monitoring starts at condition 1. Invalid drafts leave the running applied list unchanged.
 5. You can edit while monitoring continues with the applied list. The draft has no effect until Apply. Click Pause if you want to stop monitoring while editing.
 6. Resume & Restart runs the last applied list from condition 1. It does not apply draft edits. Apply and Resume also rearm a completed one-shot alert; no reattachment is needed.
@@ -17,6 +17,8 @@ To reuse an old CSV, click Import CSV. It reads ConditionsFile (default conditio
 Settings are saved automatically under MQL5/Files/PriceConditionAlerts using account, server, symbol and chart ID in the filename. Creating a new chart ID creates a separate setup. There is no manual CSV copying for normal panel editing. See https://www.mql5.com/en/docs/files/fileopen.
 
 You can also double-click/select a horizontal line for a level rule, or a rectangle for a zone rule, then click Use selected line / rectangle. Select exactly one matching drawing on the main chart. The panel copies its current prices into the draft; moving the drawing later does not automatically update the condition. Click Apply after copying. The panel can be dragged or minimised; its close button minimises it rather than removing the monitor.
+
+To pick a price directly, choose Price level, Zone low or Zone high from the dropdown beside Pick price. Click Pick price, then click an empty area of the main price chart at the desired height. The corresponding draft input is filled and picking ends. The price is rounded to the symbol's tick size and decimal precision. Pick zone boundaries separately. Click Cancel pick or press Esc to cancel. Panel clicks are ignored; indicator subwindows cannot supply a price. Changing the selected condition/rule, adding/removing/reordering, importing, applying, pausing or copying a drawing cancels an armed pick. Picked values do not change the running list until Apply & Restart.
 
 Phone alerts: find your MetaQuotes ID in MT5 mobile; enter it in desktop Tools > Options > Notifications, enable notifications and Test. Set PhoneNotifications=true in the EA. Messages go to MT5 mobile, not the Exness app.
 

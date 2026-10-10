@@ -1,6 +1,6 @@
 #property strict
-#property version "1.12"
-#property description "On-chart condition editor. Alerts only; no order operations."
+#property version "1.18"
+#property description "Ordered conditions with optional market entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
 #include <Controls\Button.mqh>
@@ -14,6 +14,112 @@ input bool ShowZonePreviews=true; // Draw draft zones; selected condition is ora
 input bool ShowPriceLevelPreviews=true; // Draw horizontal lines for draft level rules
 input int SequenceTimeoutMinutes=0; // 0 = no expiry
 input int ResetAfterTickGapSeconds=300; // 0 = disabled
+input ulong EntryMagic=20261010;
+input uint EntryDeviationPoints=20; // Risk sizing includes this adverse price allowance
+input int EntryMaxSpreadPoints=0; // 0 = no spread filter
+bool autoEntry=false;
+ENUM_ORDER_TYPE entrySide=ORDER_TYPE_BUY;
+double entrySL=0,entryTP=0;
+string entryLock="";
+
+double TradePrice(double price)
+{
+   double size=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   return size>0 ? NormalizeDouble(MathRound(price/size)*size,_Digits) : 0;
+}
+bool ValidEntryPrices(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote)
+{
+   if(!MathIsValidNumber(sl) || !MathIsValidNumber(tp) || sl<=0 || tp<=0 || quote.bid<=0 || quote.ask<=0) return false;
+   double distance=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
+   if(side==ORDER_TYPE_BUY) return sl<quote.bid && quote.bid-sl>=distance && tp>quote.ask && tp-quote.bid>=distance;
+   return sl>quote.ask && sl-quote.ask>=distance && tp<quote.bid && quote.ask-tp>=distance;
+}
+bool SymbolHasExposure()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+      if(PositionGetTicket(i)!=0 && PositionGetString(POSITION_SYMBOL)==_Symbol) return true;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+      if(OrderGetTicket(i)!=0 && OrderGetString(ORDER_SYMBOL)==_Symbol) return true;
+   return false;
+}
+double RiskVolume(double budget,double lossAtMin,double minimum,double step,double maximum)
+{
+   if(!MathIsValidNumber(budget) || !MathIsValidNumber(lossAtMin) || !MathIsValidNumber(minimum) ||
+      !MathIsValidNumber(step) || !MathIsValidNumber(maximum)) return 0;
+   if(budget<=0 || lossAtMin<=0 || minimum<=0 || step<=0 || maximum<minimum) return 0;
+   double raw=MathMin(maximum,budget/lossAtMin*minimum);
+   double volume=NormalizeDouble(MathFloor(raw/step)*step,8);
+   // Never round a too-small order up to the broker minimum.
+   if(volume<minimum || volume/minimum*lossAtMin>budget) return 0;
+   return volume;
+}
+bool EstimateEntry(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote,
+                   double &volume,double &loss,double &gain,double &budget,string &reason)
+{
+   volume=0; loss=0; gain=0; budget=AccountInfoDouble(ACCOUNT_EQUITY)*0.02;
+   if(!ValidEntryPrices(side,sl,tp,quote)) { reason="Set SL/TP on the correct sides, outside broker stop distance."; return false; }
+   double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   double maximum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double entry=side==ORDER_TYPE_BUY ? quote.ask : quote.bid;
+   double adverse=entry+(side==ORDER_TYPE_BUY ? 1 : -1)*EntryDeviationPoints*_Point;
+   double minLoss=0;
+   if(!MathIsValidNumber(budget) || budget<=0 || adverse<=0 ||
+      !OrderCalcProfit(side,_Symbol,minimum,adverse,sl,minLoss) || !MathIsValidNumber(minLoss) || minLoss>=0)
+   { reason="Cannot calculate stop-loss risk."; return false; }
+   volume=RiskVolume(budget,-minLoss,minimum,step,maximum);
+   if(volume==0) { reason="Broker minimum lot cannot fit the 2% risk budget."; return false; }
+   double pnl=0;
+   if(!OrderCalcProfit(side,_Symbol,volume,adverse,sl,pnl) || !MathIsValidNumber(pnl) || pnl>=0 || -pnl>budget)
+   { reason="Rounded volume exceeds risk budget or calculation unavailable."; return false; }
+   loss=-pnl;
+   if(!OrderCalcProfit(side,_Symbol,volume,entry,tp,gain) || !MathIsValidNumber(gain) || gain<=0)
+   { reason="Cannot calculate take-profit estimate."; return false; }
+   return true;
+}
+void ExecuteEntry()
+{
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED) || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ||
+      !MQLInfoInteger(MQL_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) ||
+      !AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   { FormMessage="Entry skipped: connection or automated trading permission unavailable."; return; }
+   double old=GlobalVariableGet(entryLock);
+   if(old>TimeLocal() || !GlobalVariableSetOnCondition(entryLock,(double)TimeLocal()+60,old))
+   { FormMessage="Entry skipped: another entry attempt on this symbol within 60 seconds."; return; }
+   // Keep the lock for 60 seconds even if the broker response is uncertain; never retry automatically.
+   if(SymbolHasExposure()) { FormMessage="Entry skipped: this symbol already has a position or pending order."; return; }
+   MqlTick quote;
+   if(!SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(entrySide,entrySL,entryTP,quote))
+   { FormMessage="Entry skipped: SL/TP invalid at the current quote or too close to market."; return; }
+   if(EntryMaxSpreadPoints>0 && (quote.ask-quote.bid)/_Point>EntryMaxSpreadPoints)
+   { FormMessage="Entry skipped: spread exceeds the configured limit."; return; }
+   double entry=entrySide==ORDER_TYPE_BUY ? quote.ask : quote.bid;
+   double volume=0,loss=0,gain=0,budget=0; string reason="";
+   if(!EstimateEntry(entrySide,entrySL,entryTP,quote,volume,loss,gain,budget,reason))
+   { FormMessage="Entry skipped: "+reason; return; }
+   MqlTradeRequest request={}; MqlTradeCheckResult check={}; MqlTradeResult result={};
+   request.action=TRADE_ACTION_DEAL; request.symbol=_Symbol; request.magic=EntryMagic;
+   request.type=entrySide; request.volume=volume; request.price=entry;
+   request.sl=entrySL; request.tp=entryTP; request.deviation=EntryDeviationPoints;
+   request.comment="PriceConditionAlerts";
+   long filling=SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
+   ENUM_SYMBOL_TRADE_EXECUTION execution=(ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_EXEMODE);
+   if(execution==SYMBOL_TRADE_EXECUTION_INSTANT || execution==SYMBOL_TRADE_EXECUTION_REQUEST ||
+      (filling & SYMBOL_FILLING_FOK)!=0) request.type_filling=ORDER_FILLING_FOK;
+   else if((filling & SYMBOL_FILLING_IOC)!=0) request.type_filling=ORDER_FILLING_IOC;
+   else if(execution!=SYMBOL_TRADE_EXECUTION_MARKET) request.type_filling=ORDER_FILLING_RETURN;
+   else { FormMessage="Entry skipped: no supported market-order filling policy."; return; }
+   if(!OrderCheck(request,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE))
+   { FormMessage="Entry check failed: "+IntegerToString(check.retcode)+" "+check.comment; Print(FormMessage); return; }
+   Print("Entry request: ",EnumToString(entrySide)," volume=",volume,
+         " budget=",budget," modeled SL loss=",loss," TP gain=",gain," SL=",entrySL," TP=",entryTP);
+   bool sent=OrderSend(request,result);
+   if(sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL))
+      FormMessage="Entry executed: "+EnumToString(entrySide)+" "+DoubleToString(result.volume,8)+" lots. Sequence stopped.";
+   else if(sent && result.retcode==TRADE_RETCODE_PLACED)
+      FormMessage="Entry accepted, awaiting broker execution. Check Trade tab; no retry.";
+   else FormMessage="Entry response: "+IntegerToString(result.retcode)+" "+result.comment+". Check Trade tab; no retry.";
+   Print(FormMessage," order=",result.order," deal=",result.deal," price=",result.price);
+}
 struct Condition
 {
    string rule;
@@ -233,6 +339,7 @@ void Notify(double price)
    string message=StringFormat("%s: all %d conditions met at %s; Bid %s",
       _Symbol,ArraySize(conditions),TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),
       DoubleToString(price,_Digits));
+   if(autoEntry) message=FormMessage+"\n"+message;
    Print(message);
    if(PopupAlerts) Alert(message);
    if(PhoneNotifications && !MQLInfoInteger(MQL_TESTER))
@@ -250,7 +357,13 @@ class CConditionPanel : public CAppDialog
 {
 private:
    CListView m_condition;
-   CComboBox m_rule,m_mode,m_timeframe,m_pick_target;
+   CComboBox m_trade_side;
+   CEdit m_trade_sl,m_trade_tp;
+   CLabel m_trade_side_label,m_trade_sl_label,m_trade_tp_label;
+   CLabel m_trade_estimate,m_trade_budget;
+   CButton m_trade_switch;
+   bool m_trade_draft;
+   CComboBox m_rule,m_mode,m_timeframe;
    CButton m_list_toggle;
    bool m_list_expanded;
    bool m_scroll_blocked,m_previous_scroll;
@@ -264,7 +377,7 @@ private:
       return false;
    }
    CEdit m_level,m_low,m_high;
-   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import,m_drawing,m_pick;
+   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import;
    CLabel m_select_label,m_rule_label,m_mode_label,m_tf_label;
    CLabel m_level_label,m_low_label,m_high_label,m_help,m_status,m_message;
    int m_selected;
@@ -278,8 +391,10 @@ private:
       m_mode_label.Shift(0,dy); m_tf_label.Shift(0,dy); m_mode.Shift(0,dy); m_timeframe.Shift(0,dy);
       m_level_label.Shift(0,dy); m_low_label.Shift(0,dy); m_high_label.Shift(0,dy);
       m_level.Shift(0,dy); m_low.Shift(0,dy); m_high.Shift(0,dy); m_help.Shift(0,dy);
-      m_drawing.Shift(0,dy); m_pick_target.Shift(0,dy); m_pick.Shift(0,dy);
       m_apply.Shift(0,dy); m_pause.Shift(0,dy); m_status.Shift(0,dy); m_message.Shift(0,dy);
+      m_trade_side.Shift(0,dy); m_trade_sl.Shift(0,dy); m_trade_tp.Shift(0,dy); m_trade_switch.Shift(0,dy);
+      m_trade_side_label.Shift(0,dy); m_trade_sl_label.Shift(0,dy); m_trade_tp_label.Shift(0,dy);
+      m_trade_estimate.Shift(0,dy); m_trade_budget.Shift(0,dy);
    }
    void OnListToggle()
    {
@@ -342,7 +457,7 @@ private:
       return false;
    }
    void CancelPick()
-   { m_picking=false; m_pick.Text("Pick price"); }
+   { m_picking=false; }
    bool Combo(CComboBox &control,string suffix,int x,int y,int width)
    { return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+24) && Add(control); }
    bool Edit(CEdit &control,string suffix,int x,int y,int width)
@@ -379,12 +494,11 @@ private:
       {
          m_rule.Disable(); m_mode.Disable(); m_timeframe.Disable();
          m_level.Disable(); m_low.Disable(); m_high.Disable();
-         m_remove.Disable(); m_up.Disable(); m_down.Disable(); m_drawing.Disable();
-         m_pick_target.Disable(); m_pick.Disable(); CancelPick();
+         m_remove.Disable(); m_up.Disable(); m_down.Disable(); CancelPick();
          m_level.Text(""); m_low.Text(""); m_high.Text("");
          m_help.Text("Click Add condition to begin."); return;
       }
-      m_rule.Enable(); m_remove.Enable(); m_drawing.Enable(); m_pick.Enable(); m_pick_target.Enable();
+      m_rule.Enable(); m_remove.Enable();
       for(int i=0;i<ArraySize(ruleCodes);i++)
          if(ruleCodes[i]==draft[m_selected].rule) { m_rule.SelectByValue(i); break; }
       if(CandleOnly(draft[m_selected].rule)) draft[m_selected].live=false;
@@ -396,14 +510,11 @@ private:
       if(CandleOnly(draft[m_selected].rule)) m_mode.Disable(); else m_mode.Enable();
       if(draft[m_selected].live) m_timeframe.Disable(); else m_timeframe.Enable();
       bool zone=ZoneRule(draft[m_selected].rule);
-      m_pick_target.ItemsClear();
       if(zone)
       {
-         m_pick_target.AddItem("Zone low",1); m_pick_target.AddItem("Zone high",2);
          if(m_pick_field==0) m_pick_field=1;
       }
-      else { m_pick_target.AddItem("Price level",0); m_pick_field=0; }
-      m_pick_target.SelectByValue(m_pick_field);
+      else if(m_pick_field<=2) m_pick_field=0;
       if(zone) { m_level.Disable(); m_low.Enable(); m_high.Enable(); }
       else { m_level.Enable(); m_low.Disable(); m_high.Disable(); }
       if(m_selected>0) m_up.Enable(); else m_up.Disable();
@@ -499,13 +610,35 @@ private:
    void OnApply()
    {
       CancelPick(); Capture(); Condition candidate[];
+      double sl=0,tp=0;
+      ENUM_ORDER_TYPE side=m_trade_side.Value()==0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      if(m_trade_draft)
+      {
+         MqlTick quote;
+         if(!Number(m_trade_sl.Text(),sl) || !Number(m_trade_tp.Text(),tp) ||
+            !SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(side,TradePrice(sl),TradePrice(tp),quote))
+         { FormMessage="Cannot apply auto entry: enter valid SL/TP on the correct sides of market."; UpdateStatus(); return; }
+         sl=TradePrice(sl); tp=TradePrice(tp);
+      }
       if(!ValidateDraft(candidate) || !SaveConditions(candidate)) { UpdateStatus(); return; }
       if(ArrayResize(conditions,ArraySize(candidate))!=ArraySize(candidate))
       { FormMessage="Not enough memory to start monitoring."; UpdateStatus(); return; }
       for(int i=0;i<ArraySize(candidate);i++) conditions[i]=candidate[i];
+      autoEntry=m_trade_draft; entrySide=side; entrySL=sl; entryTP=tp;
+      if(autoEntry) { m_trade_sl.Text(DoubleToString(sl,_Digits)); m_trade_tp.Text(DoubleToString(tp,_Digits)); }
       StartMonitoring(); FormMessage="Applied and saved. Monitoring restarted at condition 1.";
       UpdateStatus();
    }
+   void OnTradeSwitch()
+   {
+      CancelPick(); m_trade_draft=!m_trade_draft;
+      if(!m_trade_draft) autoEntry=false; // OFF takes effect immediately, including during monitoring.
+      m_trade_switch.Text(m_trade_draft ? "Auto entry ON - 2% equity (Apply to arm)" : "Auto entry OFF - alerts only");
+      FormMessage=m_trade_draft ? "Buy/Sell, SL/TP apply to the full sequence. Apply & Restart arms real/demo orders." :
+                                 "Automatic entry disabled immediately. Alerts remain available.";
+      UpdateStatus();
+   }
+   void OnTradeEdit() { Dirty(); }
    void OnPause()
    {
       CancelPick();
@@ -524,80 +657,52 @@ private:
       CopyToDraft(imported); m_selected=0;
       FormMessage="Imported into draft. Review, then Apply & Restart."; RefreshList();
    }
-   void OnDrawing()
-   {
-      if(m_selected<0) return;
-      CancelPick();
-      Capture(); bool zone=ZoneRule(draft[m_selected].rule);
-      string chosen=""; int matches=0;
-      int total=ObjectsTotal(m_chart_id,0,-1);
-      for(int i=0;i<total;i++)
-      {
-         string name=ObjectName(m_chart_id,i,0,-1);
-         if(StringFind(name,m_name+"_DraftZone_")==0) continue;
-         if(StringFind(name,m_name+"_DraftLevel_")==0) continue;
-         ENUM_OBJECT type=(ENUM_OBJECT)ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE);
-         if((zone && type!=OBJ_RECTANGLE) || (!zone && type!=OBJ_HLINE)) continue;
-         if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) continue;
-         chosen=name; matches++;
-      }
-      if(matches!=1)
-      { FormMessage=zone ? "Select exactly one chart rectangle, then click Use selected drawing." :
-                          "Select exactly one horizontal line, then click Use selected drawing.";
-        UpdateStatus(); return; }
-      double first=ObjectGetDouble(m_chart_id,chosen,OBJPROP_PRICE,0);
-      if(zone)
-      {
-         double second=ObjectGetDouble(m_chart_id,chosen,OBJPROP_PRICE,1);
-         draft[m_selected].low=DoubleToString(MathMin(first,second),_Digits);
-         draft[m_selected].high=DoubleToString(MathMax(first,second),_Digits);
-      }
-      else draft[m_selected].level=DoubleToString(first,_Digits);
-      Fields(); FormMessage="Copied drawing prices into draft. Apply to use them."; UpdateStatus();
-   }
-   void OnPickTarget()
-   {
-      int target=(int)m_pick_target.Value();
-      if(target==m_pick_field || target<0 || target>2) return;
-      CancelPick(); m_pick_field=target;
-      FormMessage="Choose Pick price, then click the main chart."; UpdateStatus();
-   }
    void BeginPick(int field)
    {
-      if(m_selected<0 || m_selected>=ArraySize(draft)) return;
+      if(field<0 || field>4) return;
+      if(field<=2 && (m_selected<0 || m_selected>=ArraySize(draft))) return;
       Capture();
-      bool zone=ZoneRule(draft[m_selected].rule);
-      if(field<0 || field>2 || (zone ? field==0 : field!=0)) return;
-      m_pick_field=field; m_pick_target.SelectByValue(field);
-      m_picking=true; m_pick.Text("Cancel pick");
-      string target=field==0 ? "price level" : (field==1 ? "zone low" : "zone high");
+      if(field<=2)
+      {
+         bool zone=ZoneRule(draft[m_selected].rule);
+         if(zone ? field==0 : field!=0) return;
+      }
+      m_pick_field=field; m_picking=true;
+      string targets[]={"price level","zone low","zone high","stop-loss price","take-profit price"};
+      string target=targets[field];
       FormMessage="Click the main chart to set "+target+". Esc cancels.";
       UpdateStatus();
-   }
-   void OnPick()
-   {
-      if(m_selected<0) return;
-      Capture();
-      if(m_picking)
-      { CancelPick(); FormMessage="Price picking cancelled."; UpdateStatus(); return; }
-      BeginPick((int)m_pick_target.Value());
    }
 protected:
    virtual void OnClickButtonClose(void) { Minimize(); }
    virtual void OnClickButtonMinMax(void)
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
-   CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; m_scroll_blocked=false; m_previous_scroll=true; }
+   CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; m_scroll_blocked=false; m_previous_scroll=true; m_trade_draft=false; }
+   void HandleChartResize()
+   {
+      SubwinOff();
+      if(!m_ready || m_minimized) return;
+      int chartHeight=(int)ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0);
+      int chartWidth=(int)ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS);
+      if(chartHeight<=0 || chartWidth<=0) return;
+      int x=MathMax(0,MathMin(Left(),MathMax(0,chartWidth-Width())));
+      int y=MathMax(0,MathMin(Top(),MathMax(0,chartHeight-Height())));
+      if(x!=Left() || y!=Top()) CAppDialog::Move(x,y);
+      m_norm_rect.SetBound(m_rect);
+   }
    bool HandleFieldLabelClick(int x,int y)
    {
-      if(!m_ready || m_minimized || m_selected<0 || m_selected>=ArraySize(draft)) return false;
+      if(!m_ready || m_minimized) return false;
       // An open dropdown can cover a label; its rows must keep their normal click behavior.
       if(OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-         OverDropdown(m_timeframe,x,y) || OverDropdown(m_pick_target,x,y)) return false;
+         OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y)) return false;
       int field=-1;
       if(m_level_label.IsVisible() && m_level_label.Contains(x,y)) field=0;
       else if(m_low_label.IsVisible() && m_low_label.Contains(x,y)) field=1;
       else if(m_high_label.IsVisible() && m_high_label.Contains(x,y)) field=2;
+      else if(m_trade_sl_label.IsVisible() && m_trade_sl_label.Contains(x,y)) field=3;
+      else if(m_trade_tp_label.IsVisible() && m_trade_tp_label.Contains(x,y)) field=4;
       if(field<0) return false;
       BeginPick(field); return true;
    }
@@ -610,7 +715,7 @@ public:
    void HandlePointer(int x,int y)
    {
       bool over=Contains(x,y) || OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-                OverDropdown(m_timeframe,x,y) || OverDropdown(m_pick_target,x,y);
+                OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y);
       if(over)
       {
          if(!m_scroll_blocked)
@@ -628,6 +733,60 @@ public:
    {
       if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
       if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftLevel_",0,-1);
+      if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftEntry_",0,-1);
+   }
+   bool HandleEntryDrag(string name)
+   {
+      string prefix=m_name+"_DraftEntry_";
+      if(name!=prefix+"SL" && name!=prefix+"TP") return false;
+      double price=TradePrice(ObjectGetDouble(m_chart_id,name,OBJPROP_PRICE));
+      ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
+      CancelPick();
+      if(!MathIsValidNumber(price) || price<=0)
+      { FormMessage="SL/TP not changed: price must be positive."; UpdateStatus(); return true; }
+      if(name==prefix+"SL") m_trade_sl.Text(DoubleToString(price,_Digits));
+      else m_trade_tp.Text(DoubleToString(price,_Digits));
+      Dirty(); return true;
+   }
+   void RefreshTradePreview()
+   {
+      if(!m_ready) return;
+      double sl=0,tp=0;
+      bool validSL=Number(m_trade_sl.Text(),sl) && sl>0;
+      bool validTP=Number(m_trade_tp.Text(),tp) && tp>0;
+      sl=TradePrice(sl); tp=TradePrice(tp);
+      string prefix=m_name+"_DraftEntry_";
+      for(int i=0;i<2;i++)
+      {
+         string name=prefix+(i==0 ? "SL" : "TP");
+         bool valid=i==0 ? validSL && sl>0 : validTP && tp>0;
+         double price=i==0 ? sl : tp;
+         if(!valid) { ObjectDelete(m_chart_id,name); continue; }
+         if(ObjectFind(m_chart_id,name)<0 && !ObjectCreate(m_chart_id,name,OBJ_HLINE,0,0,price))
+         { Print("Cannot draw SL/TP preview: ",GetLastError()); continue; }
+         if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) ObjectSetDouble(m_chart_id,name,OBJPROP_PRICE,price);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,i==0 ? clrTomato : clrLimeGreen);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_WIDTH,2);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_BACK,true);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTABLE,true);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_HIDDEN,true);
+         ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,i==0 ? "Draft stop-loss - double-click, then drag" : "Draft take-profit - double-click, then drag");
+      }
+      string currency=AccountInfoString(ACCOUNT_CURRENCY);
+      double budget=AccountInfoDouble(ACCOUNT_EQUITY)*0.02;
+      m_trade_budget.Text("Draft estimate | 2% budget: "+DoubleToString(budget,2)+" "+currency+" | excludes fees/gaps");
+      string reason="Enter stop-loss and take-profit prices.";
+      MqlTick quote; double volume=0,loss=0,gain=0;
+      ENUM_ORDER_TYPE side=m_trade_side.Value()==0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      if(validSL && validTP && SymbolInfoTick(_Symbol,quote))
+      {
+         if(EstimateEntry(side,sl,tp,quote,volume,loss,gain,budget,reason))
+            m_trade_estimate.Text("Lots: "+DoubleToString(volume,8)+" | SL loss: "+DoubleToString(loss,2)+
+                                  " | TP gain: "+DoubleToString(gain,2)+" "+currency+" | R: "+DoubleToString(gain/loss,2));
+         else m_trade_estimate.Text(reason);
+      }
+      else m_trade_estimate.Text(reason);
+      ChartRedraw(m_chart_id);
    }
    bool HandleLevelDrag(string name)
    {
@@ -713,6 +872,7 @@ public:
    }
    void DrawZonePreviews()
    {
+      RefreshTradePreview();
       DrawLevelPreviews();
       if(!m_ready || !ShowZonePreviews) return;
       string prefix=m_name+"_DraftZone_";
@@ -791,7 +951,7 @@ public:
       if(!m_picking) return false;
       // Clicks on the panel must never be interpreted as chart prices.
       if(x>=Left() && x<=Right() && y>=Top() && y<=Bottom()) return false;
-      if(m_selected<0 || m_selected>=ArraySize(draft)) { CancelPick(); return true; }
+      if(m_pick_field<=2 && (m_selected<0 || m_selected>=ArraySize(draft))) { CancelPick(); return true; }
       int window=0; datetime time=0; double price=0;
       if(!ChartXYToTimePrice(m_chart_id,x,y,window,time,price) || window!=0 ||
          !MathIsValidNumber(price) || price<=0)
@@ -807,7 +967,9 @@ public:
       Capture();
       if(m_pick_field==0) draft[m_selected].level=value;
       else if(m_pick_field==1) draft[m_selected].low=value;
-      else draft[m_selected].high=value;
+      else if(m_pick_field==2) draft[m_selected].high=value;
+      else if(m_pick_field==3) m_trade_sl.Text(value);
+      else if(m_pick_field==4) m_trade_tp.Text(value);
       CancelPick(); Fields();
       FormMessage="Copied "+value+" into draft. Apply & Restart to use it.";
       UpdateStatus(); return true;
@@ -824,7 +986,7 @@ public:
       return ScrollDropdown(m_rule,x,y,(int)delta) ||
              ScrollDropdown(m_mode,x,y,(int)delta) ||
              ScrollDropdown(m_timeframe,x,y,(int)delta) ||
-             ScrollDropdown(m_pick_target,x,y,(int)delta) || ScrollList(m_condition,x,y,(int)delta);
+             ScrollDropdown(m_trade_side,x,y,(int)delta) || ScrollList(m_condition,x,y,(int)delta);
    }
    virtual bool Create(const long chart,const string name,const int subwin,
                        const int x1,const int y1,const int x2,const int y2)
@@ -852,19 +1014,30 @@ public:
          !Edit(m_low,"Low",200,242,174) ||
          !Edit(m_high,"High",388,242,174) ||
          !Label(m_help,"Help","",12,276,550) ||
-         !Button(m_drawing,"Drawing","Use selected line / rectangle",12,302,270) ||
-         !Combo(m_pick_target,"PickTarget",300,302,156) ||
-         !Button(m_pick,"Pick","Pick price",464,302,98) ||
-         !Button(m_apply,"Apply","Apply & Restart",12,342,270) ||
-         !Button(m_pause,"Pause","Resume & Restart",300,342,262) ||
-         !Label(m_status,"Status","",12,380,550) ||
-         !Label(m_message,"Message","",12,405,550)) return false;
+         !Label(m_trade_side_label,"TradeSideLabel","Entry direction",12,302,174) ||
+         !Label(m_trade_sl_label,"TradeSLLabel","Stop-loss price",200,302,174) ||
+         !Label(m_trade_tp_label,"TradeTPLabel","Take-profit price",388,302,174) ||
+         !Combo(m_trade_side,"TradeSide",12,324,174) ||
+         !Edit(m_trade_sl,"TradeSL",200,324,174) ||
+         !Edit(m_trade_tp,"TradeTP",388,324,174) ||
+         !Label(m_trade_estimate,"TradeEstimate","",12,354,550) ||
+         !Label(m_trade_budget,"TradeBudget","",12,377,550) ||
+         !Button(m_trade_switch,"TradeSwitch","Auto entry OFF - alerts only",12,406,550) ||
+         !Button(m_apply,"Apply","Apply & Restart",12,454,270) ||
+         !Button(m_pause,"Pause","Resume & Restart",300,454,262) ||
+         !Label(m_status,"Status","",12,492,550) ||
+         !Label(m_message,"Message","",12,517,550)) return false;
       m_list_expanded=true; Height(Height()+110); m_norm_rect.Height(Height()); ShiftEditor(110);
       m_rule.ListViewItems(6);
       for(int i=0;i<ArraySize(ruleCodes);i++) if(!m_rule.AddItem(ruleNames[i],i)) return false;
       if(!m_mode.AddItem("Live Bid",0) || !m_mode.AddItem("Completed candle",1)) return false;
+      if(!m_trade_side.AddItem("Buy",0) || !m_trade_side.AddItem("Sell",1)) return false;
+      m_trade_side.Select(0);
       for(int i=0;i<ArraySize(tfValues);i++) if(!m_timeframe.AddItem(tfNames[i],i)) return false;
       m_ready=true; m_selected=0; RefreshList();
+      int chartHeight=(int)ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0);
+      if(chartHeight>0 && Height()+CONTROLS_BORDER_WIDTH>chartHeight) OnListToggle();
+      HandleChartResize();
       return true;
    }
    void UpdateStatus()
@@ -874,7 +1047,7 @@ public:
       if(!paused && !finished && ArraySize(conditions)>0)
          status="Monitoring condition "+IntegerToString(active+1)+" / "+IntegerToString(ArraySize(conditions))+": "+conditions[active].rule;
       else if(finished) status="Complete - click Resume & Restart or Apply to rearm";
-      m_status.Text(status);
+      m_status.Text((autoEntry ? "AUTO 2% | " : "ALERTS | ")+status);
       m_message.Text(FormMessage);
       m_pause.Text(paused || finished ? "Resume & Restart" : "Pause");
       DrawZonePreviews();
@@ -883,12 +1056,15 @@ public:
    virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 };
 EVENT_MAP_BEGIN(CConditionPanel)
+   ON_EVENT(ON_CLICK,m_trade_switch,OnTradeSwitch)
+   ON_EVENT(ON_CHANGE,m_trade_side,OnTradeEdit)
+   ON_EVENT(ON_END_EDIT,m_trade_sl,OnTradeEdit)
+   ON_EVENT(ON_END_EDIT,m_trade_tp,OnTradeEdit)
    ON_EVENT(ON_CLICK,m_list_toggle,OnListToggle)
    ON_EVENT(ON_CHANGE,m_condition,OnSelect)
    ON_EVENT(ON_CHANGE,m_rule,OnRule)
    ON_EVENT(ON_CHANGE,m_mode,OnMode)
    ON_EVENT(ON_CHANGE,m_timeframe,OnTimeframe)
-   ON_EVENT(ON_CHANGE,m_pick_target,OnPickTarget)
    ON_EVENT(ON_END_EDIT,m_level,OnEdit)
    ON_EVENT(ON_END_EDIT,m_low,OnEdit)
    ON_EVENT(ON_END_EDIT,m_high,OnEdit)
@@ -899,16 +1075,29 @@ EVENT_MAP_BEGIN(CConditionPanel)
    ON_EVENT(ON_CLICK,m_apply,OnApply)
    ON_EVENT(ON_CLICK,m_pause,OnPause)
    ON_EVENT(ON_CLICK,m_import,OnImport)
-   ON_EVENT(ON_CLICK,m_drawing,OnDrawing)
-   ON_EVENT(ON_CLICK,m_pick,OnPick)
 EVENT_MAP_END(CAppDialog)
 CConditionPanel panel;
 int OnInit()
 {
-   if(SequenceTimeoutMinutes<0 || ResetAfterTickGapSeconds<0)
+   if(SequenceTimeoutMinutes<0 || ResetAfterTickGapSeconds<0 || EntryMaxSpreadPoints<0)
       return INIT_PARAMETERS_INCORRECT;
    active=0; finished=false; started=0; previousBid=0; lastTick=0; lastPush=0;
    paused=true; ArrayResize(conditions,0); ArrayResize(draft,0);
+   autoEntry=false; entrySL=0; entryTP=0;
+   entryLock="PCA."+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"."+
+             StringSubstr(AccountInfoString(ACCOUNT_SERVER),0,16)+"."+StringSubstr(_Symbol,0,16);
+   // Reattaching must reuse the shared lock without resetting another instance's cooldown.
+   if(!GlobalVariableCheck(entryLock))
+   {
+      ResetLastError();
+      if(!GlobalVariableTemp(entryLock))
+      {
+         int error=GetLastError();
+         // Another chart can create the lock between the existence check and creation.
+         if(error!=ERR_GLOBALVARIABLE_EXISTS || !GlobalVariableCheck(entryLock))
+         { Print("Cannot initialize entry lock: ",error); return INIT_FAILED; }
+      }
+   }
    string symbol=_Symbol;
    StringReplace(symbol,"/","_"); StringReplace(symbol,"\\","_"); StringReplace(symbol,":","_");
    string server=AccountInfoString(ACCOUNT_SERVER);
@@ -927,11 +1116,11 @@ int OnInit()
       }
       else FormMessage="Saved settings could not be loaded. Edit or import a new list.";
    }
-   if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,505) || !panel.Run())
+   if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,617) || !panel.Run())
    { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_WHEEL,true);
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_MOVE,true);
-   Print("On-chart editor ready for ",_Symbol,". Monitoring paused; no orders will be sent.");
+   Print("On-chart editor ready for ",_Symbol,". Monitoring paused; automatic entry OFF.");
    return INIT_SUCCEEDED;
 }
 void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reason); panel.RestoreChartScroll(); Comment(""); }
@@ -939,8 +1128,13 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 {
    if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);
    if(id==CHARTEVENT_OBJECT_DRAG || id==CHARTEVENT_OBJECT_CHANGE)
-      if(panel.HandleZoneDrag(sparam) || panel.HandleLevelDrag(sparam)) return;
-   if(id==CHARTEVENT_CHART_CHANGE) panel.DrawZonePreviews();
+      if(panel.HandleZoneDrag(sparam) || panel.HandleLevelDrag(sparam) || panel.HandleEntryDrag(sparam)) return;
+   if(id==CHARTEVENT_CHART_CHANGE)
+   {
+      // CAppDialog's default handler auto-minimizes panels taller than the chart.
+      // This fixed main-chart editor keeps its state; only user controls minimize it.
+      panel.HandleChartResize(); panel.DrawZonePreviews(); return;
+   }
    if(id==CHARTEVENT_MOUSE_WHEEL)
    {
       panel.HandlePointer((int)(short)lparam,(int)(short)(lparam>>16));
@@ -957,6 +1151,9 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 }
 void OnTick()
 {
+   static datetime previewSecond=0;
+   datetime nowPreview=TimeLocal();
+   if(nowPreview!=previewSecond) { previewSecond=nowPreview; panel.RefreshTradePreview(); }
    static datetime previewBar=0;
    datetime chartBar=iTime(_Symbol,_Period,0);
    if(chartBar!=previewBar) { previewBar=chartBar; panel.DrawZonePreviews(); }
@@ -996,6 +1193,11 @@ void OnTick()
    active++;
    if(active==ArraySize(conditions))
    {
+      if(autoEntry)
+      {
+         finished=true; // One attempt per arm, even if skipped/rejected; no automatic retries.
+         ExecuteEntry(); Notify(tick.bid); panel.UpdateStatus(); return;
+      }
       Notify(tick.bid);
       if(OneShot) { finished=true; panel.UpdateStatus(); return; }
       ResetSequence("Sequence completed");

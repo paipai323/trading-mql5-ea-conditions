@@ -1,5 +1,5 @@
 #property strict
-#property version "1.10"
+#property version "1.11"
 #property description "On-chart condition editor. Alerts only; no order operations."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -560,17 +560,25 @@ private:
       CancelPick(); m_pick_field=target;
       FormMessage="Choose Pick price, then click the main chart."; UpdateStatus();
    }
+   void BeginPick(int field)
+   {
+      if(m_selected<0 || m_selected>=ArraySize(draft)) return;
+      Capture();
+      bool zone=ZoneRule(draft[m_selected].rule);
+      if(field<0 || field>2 || (zone ? field==0 : field!=0)) return;
+      m_pick_field=field; m_pick_target.SelectByValue(field);
+      m_picking=true; m_pick.Text("Cancel pick");
+      string target=field==0 ? "price level" : (field==1 ? "zone low" : "zone high");
+      FormMessage="Click the main chart to set "+target+". Esc cancels.";
+      UpdateStatus();
+   }
    void OnPick()
    {
       if(m_selected<0) return;
       Capture();
       if(m_picking)
       { CancelPick(); FormMessage="Price picking cancelled."; UpdateStatus(); return; }
-      m_pick_field=(int)m_pick_target.Value();
-      m_picking=true; m_pick.Text("Cancel pick");
-      string field=m_pick_field==0 ? "price level" : (m_pick_field==1 ? "zone low" : "zone high");
-      FormMessage="Click the main chart to set "+field+". Esc cancels.";
-      UpdateStatus();
+      BeginPick((int)m_pick_target.Value());
    }
 protected:
    virtual void OnClickButtonClose(void) { Minimize(); }
@@ -578,6 +586,19 @@ protected:
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
    CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; m_scroll_blocked=false; m_previous_scroll=true; }
+   bool HandleFieldLabelClick(int x,int y)
+   {
+      if(!m_ready || m_minimized || m_selected<0 || m_selected>=ArraySize(draft)) return false;
+      // An open dropdown can cover a label; its rows must keep their normal click behavior.
+      if(OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
+         OverDropdown(m_timeframe,x,y) || OverDropdown(m_pick_target,x,y)) return false;
+      int field=-1;
+      if(m_level_label.IsVisible() && m_level_label.Contains(x,y)) field=0;
+      else if(m_low_label.IsVisible() && m_low_label.Contains(x,y)) field=1;
+      else if(m_high_label.IsVisible() && m_high_label.Contains(x,y)) field=2;
+      if(field<0) return false;
+      BeginPick(field); return true;
+   }
    void RestoreChartScroll()
    {
       if(!m_scroll_blocked) return;
@@ -866,7 +887,11 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       panel.HandlePointer((int)(short)lparam,(int)(short)(lparam>>16));
       if(panel.HandleWheel(lparam,dparam)) return;
    }
-   if(id==CHARTEVENT_CLICK && panel.HandlePriceClick((int)lparam,(int)dparam)) return;
+   if(id==CHARTEVENT_CLICK)
+   {
+      if(panel.HandleFieldLabelClick((int)lparam,(int)dparam)) return;
+      if(panel.HandlePriceClick((int)lparam,(int)dparam)) return;
+   }
    if(id==CHARTEVENT_KEYDOWN && lparam==27 && panel.HandleEscape()) return;
    panel.ChartEvent(id,lparam,dparam,sparam);
    if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);

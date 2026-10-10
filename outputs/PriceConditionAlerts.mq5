@@ -1,7 +1,12 @@
 #property strict
-#property version "1.02"
-#property description "User-defined condition list. Alerts only; no order operations."
-input string ConditionsFile="conditions.csv"; // In MQL5/Files
+#property version "1.03"
+#property description "On-chart condition editor. Alerts only; no order operations."
+#include <Controls\Dialog.mqh>
+#include <Controls\ComboBox.mqh>
+#include <Controls\Button.mqh>
+#include <Controls\Edit.mqh>
+#include <Controls\Label.mqh>
+input string ConditionsFile="conditions.csv"; // Optional import, not required on startup
 input bool PopupAlerts=true;
 input bool PhoneNotifications=false;
 input bool OneShot=true;
@@ -15,6 +20,24 @@ struct Condition
    double level,low,high;
 };
 Condition conditions[];
+struct DraftCondition
+{
+   string rule,level,low,high;
+   bool live;
+   ENUM_TIMEFRAMES timeframe;
+};
+DraftCondition draft[];
+bool paused=true;
+string savedFile="";
+string ruleCodes[]={"ZONE_ENTER","ZONE_TOUCH","TRADED_ABOVE","TRADED_BELOW",
+   "SWEEP_ABOVE_REJECT","SWEEP_BELOW_RECLAIM","CLOSE_ABOVE","CLOSE_BELOW",
+   "CROSS_ABOVE","CROSS_BELOW","CLOSE_IN_ZONE"};
+string ruleNames[]={"Enters zone","Is in / touches zone","Trades above level","Trades below level",
+   "Sweeps above, returns below","Sweeps below, returns above","Candle closes above",
+   "Candle closes below","First candle close above","First candle close below","Candle closes in zone"};
+ENUM_TIMEFRAMES tfValues[]={PERIOD_M1,PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
+string tfNames[]={"M1","M5","M15","M30","H1","H4","D1"};
+string FormMessage="Add your conditions, then Apply & Restart. Monitoring is paused.";
 int active=0;
 bool finished=false,aboveSeen=false,belowSeen=false;
 double previousBid=0;
@@ -63,12 +86,17 @@ bool KnownRule(string rule)
       rule=="CLOSE_ABOVE" || rule=="CLOSE_BELOW" ||
       rule=="CROSS_ABOVE" || rule=="CROSS_BELOW";
 }
-bool LoadConditions()
+bool CandleOnly(string rule)
 {
-   ArrayResize(conditions,0);
-   int handle=FileOpen(ConditionsFile,FILE_READ|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+   return rule=="CLOSE_IN_ZONE" || rule=="CLOSE_ABOVE" || rule=="CLOSE_BELOW" ||
+          rule=="CROSS_ABOVE" || rule=="CROSS_BELOW";
+}
+bool LoadConditions(string filename,Condition &target[])
+{
+   ArrayResize(target,0);
+   int handle=FileOpen(filename,FILE_READ|FILE_TXT|FILE_ANSI,0,CP_UTF8);
    if(handle==INVALID_HANDLE)
-   { Print("Cannot open ",ConditionsFile," in MQL5/Files; error ",GetLastError()); return false; }
+   { FormMessage="Cannot open "+filename+" in MQL5/Files."; Print(FormMessage," error ",GetLastError()); return false; }
    int lineNumber=0;
    bool valid=true;
    while(!FileIsEnding(handle))
@@ -85,19 +113,81 @@ bool LoadConditions()
          !Timeframe(cells[2],item.timeframe) || !Number(cells[3],item.level) ||
          !Number(cells[4],item.low) || !Number(cells[5],item.high))
       { valid=false; break; }
-      if(item.live && (item.rule=="CLOSE_IN_ZONE" || item.rule=="CLOSE_ABOVE" ||
-         item.rule=="CLOSE_BELOW" || item.rule=="CROSS_ABOVE" || item.rule=="CROSS_BELOW"))
+      if(item.live && CandleOnly(item.rule))
       { valid=false; break; }
       if(ZoneRule(item.rule) ? item.low<=0 || item.high<=item.low : item.level<=0)
       { valid=false; break; }
-      int count=ArraySize(conditions);
-      if(ArrayResize(conditions,count+1)!=count+1) { valid=false; break; }
-      conditions[count]=item;
+      int count=ArraySize(target);
+      if(ArrayResize(target,count+1)!=count+1) { valid=false; break; }
+      target[count]=item;
    }
    FileClose(handle);
-   if(!valid) Print("Invalid condition file at line ",lineNumber,". Monitor will not start.");
-   if(ArraySize(conditions)==0) { Print("At least one condition is required."); valid=false; }
+   if(!valid) { FormMessage="Invalid configuration at line "+IntegerToString(lineNumber)+"."; Print(FormMessage); }
+   if(ArraySize(target)==0) { FormMessage="At least one condition is required."; valid=false; }
    return valid;
+}
+string TfCode(ENUM_TIMEFRAMES tf)
+{
+   for(int i=0;i<ArraySize(tfValues);i++) if(tfValues[i]==tf) return tfNames[i];
+   return "H1";
+}
+void CopyToDraft(const Condition &source[])
+{
+   ArrayResize(draft,ArraySize(source));
+   for(int i=0;i<ArraySize(source);i++)
+   {
+      draft[i].rule=source[i].rule; draft[i].live=source[i].live;
+      draft[i].timeframe=source[i].timeframe;
+      draft[i].level=DoubleToString(source[i].level,_Digits);
+      draft[i].low=DoubleToString(source[i].low,_Digits);
+      draft[i].high=DoubleToString(source[i].high,_Digits);
+   }
+}
+bool ValidateDraft(Condition &result[])
+{
+   int count=ArraySize(draft);
+   if(count==0) { FormMessage="Add at least one condition before applying."; return false; }
+   if(ArrayResize(result,count)!=count) return false;
+   for(int i=0;i<count;i++)
+   {
+      result[i].rule=draft[i].rule; result[i].live=draft[i].live;
+      result[i].timeframe=draft[i].timeframe;
+      result[i].level=0; result[i].low=0; result[i].high=0;
+      string prefix="Condition "+IntegerToString(i+1)+": ";
+      if(!KnownRule(result[i].rule) || (result[i].live && CandleOnly(result[i].rule)))
+      { FormMessage=prefix+"choose a valid rule and evaluation mode."; return false; }
+      if(ZoneRule(result[i].rule))
+      {
+         if(!Number(draft[i].low,result[i].low) || !Number(draft[i].high,result[i].high) ||
+            result[i].low<=0 || result[i].high<=result[i].low)
+         { FormMessage=prefix+"zone low must be positive; zone high must be larger."; return false; }
+      }
+      else if(!Number(draft[i].level,result[i].level) || result[i].level<=0)
+      { FormMessage=prefix+"enter a positive price level."; return false; }
+   }
+   return true;
+}
+bool SaveConditions(const Condition &source[])
+{
+   string temporary=savedFile+".tmp";
+   int handle=FileOpen(temporary,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+   if(handle==INVALID_HANDLE) { FormMessage="Could not save settings. Monitoring was not changed."; return false; }
+   string text="rule,mode,timeframe,level,zone_low,zone_high\r\n";
+   for(int i=0;i<ArraySize(source);i++)
+      text+=source[i].rule+","+(source[i].live ? "LIVE" : "CANDLE")+","+
+         TfCode(source[i].timeframe)+","+DoubleToString(source[i].level,16)+","+
+         DoubleToString(source[i].low,16)+","+DoubleToString(source[i].high,16)+"\r\n";
+   uint written=FileWriteString(handle,text);
+   FileFlush(handle); FileClose(handle);
+   if(written!=(uint)StringLen(text) || !FileMove(temporary,0,savedFile,FILE_REWRITE))
+   { FormMessage="Could not save settings. Monitoring was not changed."; return false; }
+   return true;
+}
+void StartMonitoring()
+{
+   active=0; finished=false; started=0; previousBid=0; lastTick=0;
+   PrimeStep(); paused=false;
+   Print("Monitoring restarted with ",ArraySize(conditions)," conditions.");
 }
 void PrimeStep()
 {
@@ -154,28 +244,328 @@ void Notify(double price)
       else Print("Push rate limited; signal saved in Experts log.");
    }
 }
+class CConditionPanel : public CAppDialog
+{
+private:
+   CComboBox m_condition,m_rule,m_mode,m_timeframe;
+   CEdit m_level,m_low,m_high;
+   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import,m_drawing;
+   CLabel m_select_label,m_rule_label,m_mode_label,m_tf_label;
+   CLabel m_level_label,m_low_label,m_high_label,m_help,m_status,m_message;
+   int m_selected;
+   bool m_ready;
+   bool Combo(CComboBox &control,string suffix,int x,int y,int width)
+   { return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+24) && Add(control); }
+   bool Edit(CEdit &control,string suffix,int x,int y,int width)
+   { return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+24) && Add(control); }
+   bool Button(CButton &control,string suffix,string text,int x,int y,int width)
+   {
+      return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+26) &&
+             control.Text(text) && Add(control);
+   }
+   bool Label(CLabel &control,string suffix,string text,int x,int y,int width)
+   {
+      return control.Create(m_chart_id,m_name+suffix,m_subwin,x,y,x+width,y+20) &&
+             control.Text(text) && Add(control);
+   }
+   void Dirty()
+   { FormMessage="Draft edits only. Apply & Restart resets monitoring to condition 1."; UpdateStatus(); }
+   void Capture()
+   {
+      if(m_selected<0 || m_selected>=ArraySize(draft)) return;
+      int r=(int)m_rule.Value();
+      if(r>=0 && r<ArraySize(ruleCodes)) draft[m_selected].rule=ruleCodes[r];
+      draft[m_selected].live=m_mode.Value()==0;
+      if(CandleOnly(draft[m_selected].rule)) draft[m_selected].live=false;
+      int tf=(int)m_timeframe.Value();
+      if(tf>=0 && tf<ArraySize(tfValues)) draft[m_selected].timeframe=tfValues[tf];
+      draft[m_selected].level=Clean(m_level.Text());
+      draft[m_selected].low=Clean(m_low.Text());
+      draft[m_selected].high=Clean(m_high.Text());
+   }
+   void Fields()
+   {
+      bool available=m_selected>=0 && m_selected<ArraySize(draft);
+      if(!available)
+      {
+         m_rule.Disable(); m_mode.Disable(); m_timeframe.Disable();
+         m_level.Disable(); m_low.Disable(); m_high.Disable();
+         m_remove.Disable(); m_up.Disable(); m_down.Disable(); m_drawing.Disable();
+         m_level.Text(""); m_low.Text(""); m_high.Text("");
+         m_help.Text("Click Add condition to begin."); return;
+      }
+      m_rule.Enable(); m_remove.Enable(); m_drawing.Enable();
+      for(int i=0;i<ArraySize(ruleCodes);i++)
+         if(ruleCodes[i]==draft[m_selected].rule) { m_rule.SelectByValue(i); break; }
+      if(CandleOnly(draft[m_selected].rule)) draft[m_selected].live=false;
+      m_mode.SelectByValue(draft[m_selected].live ? 0 : 1);
+      for(int i=0;i<ArraySize(tfValues);i++)
+         if(tfValues[i]==draft[m_selected].timeframe) { m_timeframe.SelectByValue(i); break; }
+      m_level.Text(draft[m_selected].level); m_low.Text(draft[m_selected].low);
+      m_high.Text(draft[m_selected].high);
+      if(CandleOnly(draft[m_selected].rule)) m_mode.Disable(); else m_mode.Enable();
+      if(draft[m_selected].live) m_timeframe.Disable(); else m_timeframe.Enable();
+      bool zone=ZoneRule(draft[m_selected].rule);
+      if(zone) { m_level.Disable(); m_low.Enable(); m_high.Enable(); }
+      else { m_level.Enable(); m_low.Disable(); m_high.Disable(); }
+      if(m_selected>0) m_up.Enable(); else m_up.Disable();
+      if(m_selected<ArraySize(draft)-1) m_down.Enable(); else m_down.Disable();
+      m_help.Text(draft[m_selected].live ? "Live Bid; no candle-close wait." : "Checks newly completed candles on the selected timeframe.");
+   }
+   void RefreshList()
+   {
+      m_condition.ItemsClear();
+      int count=ArraySize(draft);
+      if(count==0)
+      {
+         m_selected=-1;
+         m_condition.AddItem("No conditions - click Add",-1); m_condition.Select(0);
+         m_condition.Disable();
+      }
+      else
+      {
+         m_condition.Enable();
+         m_selected=MathMax(0,MathMin(m_selected,count-1));
+         for(int i=0;i<count;i++)
+         {
+            string name=draft[i].rule;
+            for(int r=0;r<ArraySize(ruleCodes);r++) if(ruleCodes[r]==name) { name=ruleNames[r]; break; }
+            m_condition.AddItem(IntegerToString(i+1)+". "+name,i);
+         }
+         m_condition.SelectByValue(m_selected);
+      }
+      Fields(); UpdateStatus(); ChartRedraw();
+   }
+   void OnSelect()
+   {
+      int selection=(int)m_condition.Value();
+      if(selection==m_selected || selection<0 || selection>=ArraySize(draft)) return;
+      Capture(); m_selected=selection; Fields(); ChartRedraw();
+   }
+   void OnRule()
+   {
+      if(m_selected<0) return;
+      int r=(int)m_rule.Value();
+      if(r<0 || r>=ArraySize(ruleCodes) || draft[m_selected].rule==ruleCodes[r]) return;
+      Capture(); Dirty(); RefreshList();
+   }
+   void OnMode()
+   {
+      if(m_selected<0 || draft[m_selected].live==(m_mode.Value()==0)) return;
+      Capture(); Fields(); Dirty();
+   }
+   void OnTimeframe()
+   {
+      if(m_selected<0) return;
+      int tf=(int)m_timeframe.Value();
+      if(tf<0 || tf>=ArraySize(tfValues) || draft[m_selected].timeframe==tfValues[tf]) return;
+      Capture(); Dirty();
+   }
+   void OnEdit()
+   {
+      if(m_selected<0) return;
+      if(draft[m_selected].level==Clean(m_level.Text()) && draft[m_selected].low==Clean(m_low.Text()) &&
+         draft[m_selected].high==Clean(m_high.Text())) return;
+      Capture(); Dirty();
+   }
+   void OnAdd()
+   {
+      Capture(); int count=ArraySize(draft);
+      if(ArrayResize(draft,count+1)!=count+1) { FormMessage="Not enough memory to add a condition."; UpdateStatus(); return; }
+      draft[count].rule="ZONE_ENTER"; draft[count].live=true; draft[count].timeframe=PERIOD_H1;
+      draft[count].level=""; draft[count].low=""; draft[count].high="";
+      m_selected=count; Dirty(); RefreshList();
+   }
+   void OnRemove()
+   {
+      if(m_selected<0) return;
+      int count=ArraySize(draft);
+      for(int i=m_selected;i<count-1;i++) draft[i]=draft[i+1];
+      ArrayResize(draft,count-1);
+      m_selected=MathMin(m_selected,count-2); Dirty(); RefreshList();
+   }
+   void Move(int direction)
+   {
+      int target=m_selected+direction;
+      if(m_selected<0 || target<0 || target>=ArraySize(draft)) return;
+      Capture(); DraftCondition temp=draft[m_selected];
+      draft[m_selected]=draft[target]; draft[target]=temp; m_selected=target;
+      Dirty(); RefreshList();
+   }
+   void OnUp() { Move(-1); }
+   void OnDown() { Move(1); }
+   void OnApply()
+   {
+      Capture(); Condition candidate[];
+      if(!ValidateDraft(candidate) || !SaveConditions(candidate)) { UpdateStatus(); return; }
+      if(ArrayResize(conditions,ArraySize(candidate))!=ArraySize(candidate))
+      { FormMessage="Not enough memory to start monitoring."; UpdateStatus(); return; }
+      for(int i=0;i<ArraySize(candidate);i++) conditions[i]=candidate[i];
+      StartMonitoring(); FormMessage="Applied and saved. Monitoring restarted at condition 1.";
+      UpdateStatus();
+   }
+   void OnPause()
+   {
+      if(!paused && !finished)
+      { paused=true; FormMessage="Paused. Resume restarts at condition 1; missed prices are not replayed."; }
+      else if(ArraySize(conditions)>0)
+      { StartMonitoring(); FormMessage="Monitoring restarted with the applied list. Draft edits are not applied."; }
+      else FormMessage="Apply a valid condition list before starting.";
+      UpdateStatus();
+   }
+   void OnImport()
+   {
+      Condition imported[];
+      if(!LoadConditions(ConditionsFile,imported)) { UpdateStatus(); return; }
+      CopyToDraft(imported); m_selected=0;
+      FormMessage="Imported into draft. Review, then Apply & Restart."; RefreshList();
+   }
+   void OnDrawing()
+   {
+      if(m_selected<0) return;
+      Capture(); bool zone=ZoneRule(draft[m_selected].rule);
+      string chosen=""; int matches=0;
+      int total=ObjectsTotal(m_chart_id,0,-1);
+      for(int i=0;i<total;i++)
+      {
+         string name=ObjectName(m_chart_id,i,0,-1);
+         ENUM_OBJECT type=(ENUM_OBJECT)ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE);
+         if((zone && type!=OBJ_RECTANGLE) || (!zone && type!=OBJ_HLINE)) continue;
+         if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) continue;
+         chosen=name; matches++;
+      }
+      if(matches!=1)
+      { FormMessage=zone ? "Select exactly one chart rectangle, then click Use selected drawing." :
+                          "Select exactly one horizontal line, then click Use selected drawing.";
+        UpdateStatus(); return; }
+      double first=ObjectGetDouble(m_chart_id,chosen,OBJPROP_PRICE,0);
+      if(zone)
+      {
+         double second=ObjectGetDouble(m_chart_id,chosen,OBJPROP_PRICE,1);
+         draft[m_selected].low=DoubleToString(MathMin(first,second),_Digits);
+         draft[m_selected].high=DoubleToString(MathMax(first,second),_Digits);
+      }
+      else draft[m_selected].level=DoubleToString(first,_Digits);
+      Fields(); FormMessage="Copied drawing prices into draft. Apply to use them."; UpdateStatus();
+   }
+protected:
+   virtual void OnClickButtonClose(void) { Minimize(); }
+   virtual void OnClickButtonMinMax(void)
+   { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
+public:
+   CConditionPanel() { m_selected=-1; m_ready=false; }
+   virtual bool Create(const long chart,const string name,const int subwin,
+                       const int x1,const int y1,const int x2,const int y2)
+   {
+      if(!CAppDialog::Create(chart,name,subwin,x1,y1,x2,y2)) return false;
+      if(!Label(m_select_label,"SelectLabel","Condition list (edit one condition at a time)",12,10,550) ||
+         !Combo(m_condition,"Condition",12,32,550) ||
+         !Button(m_add,"Add","+ Add",12,66,94) ||
+         !Button(m_remove,"Remove","Remove",114,66,94) ||
+         !Button(m_up,"Up","Move up",216,66,94) ||
+         !Button(m_down,"Down","Move down",318,66,104) ||
+         !Button(m_import,"Import","Import CSV",430,66,132) ||
+         !Label(m_rule_label,"RuleLabel","Rule",12,108,320) ||
+         !Combo(m_rule,"Rule",12,130,550) ||
+         !Label(m_mode_label,"ModeLabel","Evaluate",12,164,250) ||
+         !Label(m_tf_label,"TfLabel","Candle timeframe",300,164,260) ||
+         !Combo(m_mode,"Mode",12,186,270) ||
+         !Combo(m_timeframe,"Timeframe",300,186,262) ||
+         !Label(m_level_label,"LevelLabel","Price level",12,220,170) ||
+         !Label(m_low_label,"LowLabel","Zone low",200,220,170) ||
+         !Label(m_high_label,"HighLabel","Zone high",388,220,170) ||
+         !Edit(m_level,"Level",12,242,174) ||
+         !Edit(m_low,"Low",200,242,174) ||
+         !Edit(m_high,"High",388,242,174) ||
+         !Label(m_help,"Help","",12,276,550) ||
+         !Button(m_drawing,"Drawing","Use selected line / rectangle",12,302,270) ||
+         !Button(m_apply,"Apply","Apply & Restart",12,342,270) ||
+         !Button(m_pause,"Pause","Resume & Restart",300,342,262) ||
+         !Label(m_status,"Status","",12,380,550) ||
+         !Label(m_message,"Message","",12,405,550)) return false;
+      m_condition.ListViewItems(6); m_rule.ListViewItems(6);
+      for(int i=0;i<ArraySize(ruleCodes);i++) if(!m_rule.AddItem(ruleNames[i],i)) return false;
+      if(!m_mode.AddItem("Live Bid",0) || !m_mode.AddItem("Completed candle",1)) return false;
+      for(int i=0;i<ArraySize(tfValues);i++) if(!m_timeframe.AddItem(tfNames[i],i)) return false;
+      m_ready=true; m_selected=0; RefreshList();
+      return true;
+   }
+   void UpdateStatus()
+   {
+      if(!m_ready) return;
+      string status="Paused";
+      if(!paused && !finished && ArraySize(conditions)>0)
+         status="Monitoring condition "+IntegerToString(active+1)+" / "+IntegerToString(ArraySize(conditions))+": "+conditions[active].rule;
+      else if(finished) status="Complete - click Resume & Restart or Apply to rearm";
+      m_status.Text(status);
+      m_message.Text(FormMessage);
+      m_pause.Text(paused || finished ? "Resume & Restart" : "Pause");
+      ChartRedraw();
+   }
+   virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
+};
+EVENT_MAP_BEGIN(CConditionPanel)
+   ON_EVENT(ON_CHANGE,m_condition,OnSelect)
+   ON_EVENT(ON_CHANGE,m_rule,OnRule)
+   ON_EVENT(ON_CHANGE,m_mode,OnMode)
+   ON_EVENT(ON_CHANGE,m_timeframe,OnTimeframe)
+   ON_EVENT(ON_END_EDIT,m_level,OnEdit)
+   ON_EVENT(ON_END_EDIT,m_low,OnEdit)
+   ON_EVENT(ON_END_EDIT,m_high,OnEdit)
+   ON_EVENT(ON_CLICK,m_add,OnAdd)
+   ON_EVENT(ON_CLICK,m_remove,OnRemove)
+   ON_EVENT(ON_CLICK,m_up,OnUp)
+   ON_EVENT(ON_CLICK,m_down,OnDown)
+   ON_EVENT(ON_CLICK,m_apply,OnApply)
+   ON_EVENT(ON_CLICK,m_pause,OnPause)
+   ON_EVENT(ON_CLICK,m_import,OnImport)
+   ON_EVENT(ON_CLICK,m_drawing,OnDrawing)
+EVENT_MAP_END(CAppDialog)
+CConditionPanel panel;
 int OnInit()
 {
-   if(SequenceTimeoutMinutes<0 || ResetAfterTickGapSeconds<0 || !LoadConditions())
+   if(SequenceTimeoutMinutes<0 || ResetAfterTickGapSeconds<0)
       return INIT_PARAMETERS_INCORRECT;
    active=0; finished=false; started=0; previousBid=0; lastTick=0; lastPush=0;
-   PrimeStep();
-   Print("Loaded ",ArraySize(conditions)," custom conditions for ",_Symbol,". Alerts only.");
+   paused=true; ArrayResize(conditions,0); ArrayResize(draft,0);
+   string symbol=_Symbol;
+   StringReplace(symbol,"/","_"); StringReplace(symbol,"\\","_"); StringReplace(symbol,":","_");
+   string server=AccountInfoString(ACCOUNT_SERVER);
+   StringReplace(server,"/","_"); StringReplace(server,"\\","_"); StringReplace(server,":","_");
+   savedFile="PriceConditionAlerts\\"+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"_"+
+             server+"_"+symbol+"_"+IntegerToString(ChartID())+".csv";
+   if(FileIsExist(savedFile))
+   {
+      Condition saved[];
+      if(LoadConditions(savedFile,saved))
+      {
+         ArrayResize(conditions,ArraySize(saved));
+         for(int i=0;i<ArraySize(saved);i++) conditions[i]=saved[i];
+         CopyToDraft(saved);
+         FormMessage="Saved list restored. Click Resume & Restart when ready.";
+      }
+      else FormMessage="Saved settings could not be loaded. Edit or import a new list.";
+   }
+   if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,505) || !panel.Run())
+   { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
+   Print("On-chart editor ready for ",_Symbol,". Monitoring paused; no orders will be sent.");
    return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { Comment(""); }
+void OnDeinit(const int reason) { panel.Destroy(reason); Comment(""); }
+void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
+{ panel.ChartEvent(id,lparam,dparam,sparam); }
 void OnTick()
 {
-   if(finished) return;
+   if(paused || finished || ArraySize(conditions)==0) return;
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick) || tick.bid<=0) return;
    datetime now=TimeCurrent();
    if(lastTick!=0 && ResetAfterTickGapSeconds>0 && now-lastTick>ResetAfterTickGapSeconds)
-   { ResetSequence("Tick gap detected"); previousBid=0; }
+   { ResetSequence("Tick gap detected"); previousBid=0; panel.UpdateStatus(); }
    lastTick=now;
    if(previousBid==0) { previousBid=tick.bid; return; }
    if(started!=0 && SequenceTimeoutMinutes>0 && now-started>SequenceTimeoutMinutes*60)
-      ResetSequence("Sequence expired");
+   { ResetSequence("Sequence expired"); panel.UpdateStatus(); }
    Condition item=conditions[active];
    MqlRates prior,bar;
    if(item.live)
@@ -196,9 +586,6 @@ void OnTick()
       lastCandle=bar.time;
    }
    previousBid=tick.bid;
-   Comment("Custom conditions: ",active+1," / ",ArraySize(conditions),
-           "\nWaiting for ",item.rule," (",item.live ? "live Bid" : "candle close",
-           ")\nAlerts only");
    if(!Matches(item,prior,bar)) return;
    if(active==0) started=now;
    Print("Condition ",active+1," passed: ",item.rule," at ",TimeToString(now,TIME_DATE|TIME_SECONDS));
@@ -206,8 +593,9 @@ void OnTick()
    if(active==ArraySize(conditions))
    {
       Notify(tick.bid);
-      if(OneShot) { finished=true; Comment("All conditions met. Reattach to rearm."); return; }
+      if(OneShot) { finished=true; panel.UpdateStatus(); return; }
       ResetSequence("Sequence completed");
    }
    else PrimeStep(); // Next condition starts after this update, with fresh sweep memory.
+   panel.UpdateStatus();
 }

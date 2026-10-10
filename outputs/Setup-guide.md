@@ -1,17 +1,22 @@
 # Custom MT5 condition alerts
 
-PriceConditionAlerts now reads your own ordered condition list. It never places orders. There are no fixed three slots and no preset trading strategy.
+PriceConditionAlerts has a condition editor directly on the MT5 chart. It never places orders. There are no fixed three slots and no preset trading strategy.
 
 ## Create and use conditions
 
-1. Open condition-editor.html in a browser. Add/remove rows, choose a rule for each, set prices and reorder with Move up/down. Each row supports live Bid or completed candles, with its own candle timeframe.
-2. Replace the illustrative example prices. Export conditions.csv. Import restores an exported list. Drafts are saved in browser storage where available.
-3. In desktop MT5 select File > Open Data Folder. Copy the CSV into MQL5/Files; ensure its filename is conditions.csv (repeated downloads can append a number).
-4. Copy PriceConditionAlerts.ex5 into MQL5/Experts. Refresh Navigator and attach the EA to your exact symbol. Source can alternatively be compiled with MetaEditor.
-5. Keep ConditionsFile=conditions.csv and OneShot=true initially. Keep desktop MT5 connected and running; the editor can close.
-6. After changing the CSV, replace it and reattach the EA. Reloading restarts at condition 1; it is not automatic.
+1. Copy the updated PriceConditionAlerts.ex5 into desktop MT5's data folder > MQL5 > Experts. Remove the previous instance, refresh Navigator, and attach the updated EA to your exact symbol. You can alternatively compile the source in MetaEditor.
+2. The chart panel opens paused. No configuration file is required. Click + Add, select a rule, choose live Bid or completed candles, and enter a level or zone. For candle rules choose a timeframe.
+3. Add more conditions. Use the condition-list dropdown to select the condition to edit; Move up/down changes its order and Remove deletes it. The editor shows one condition at a time, without limiting list length.
+4. Click Apply & Restart. All draft conditions are validated and saved automatically, then monitoring starts at condition 1. Invalid drafts leave the running applied list unchanged.
+5. You can edit while monitoring continues with the applied list. The draft has no effect until Apply. Click Pause if you want to stop monitoring while editing.
+6. Resume & Restart runs the last applied list from condition 1. It does not apply draft edits. Apply and Resume also rearm a completed one-shot alert; no reattachment is needed.
+7. Keep MT5 awake, running and connected. Removing/reinitialising the EA clears progress and pauses monitoring. Previously applied settings are restored for the same account, server, symbol and chart ID; click Resume when ready. Unsaved draft edits are discarded on reinitialisation.
 
-The HTML is a local configuration editor, not an account connection. Copying the CSV is necessary because MT5 reads its file sandbox. See https://www.mql5.com/en/docs/files/fileopen.
+To reuse an old CSV, click Import CSV. It reads ConditionsFile (default conditions.csv) from MQL5/Files into the draft only. Review and Apply.
+
+Settings are saved automatically under MQL5/Files/PriceConditionAlerts using account, server, symbol and chart ID in the filename. Creating a new chart ID creates a separate setup. There is no manual CSV copying for normal panel editing. See https://www.mql5.com/en/docs/files/fileopen.
+
+You can also double-click/select a horizontal line for a level rule, or a rectangle for a zone rule, then click Use selected line / rectangle. Select exactly one matching drawing on the main chart. The panel copies its current prices into the draft; moving the drawing later does not automatically update the condition. Click Apply after copying. The panel can be dragged or minimised; its close button minimises it rather than removing the monitor.
 
 Phone alerts: find your MetaQuotes ID in MT5 mobile; enter it in desktop Tools > Options > Notifications, enable notifications and Test. Set PhoneNotifications=true in the EA. Messages go to MT5 mobile, not the Exness app.
 
@@ -35,11 +40,11 @@ Live rules use Bid, not Ask or Last. Zone boundaries are inclusive; level compar
 - Conditions are evaluated in list order; only the active step is monitored. Passed steps remain satisfied. Each step requires a separate tick/evaluation. Prior sweeps do not count for a newly activated step.
 - Rows can mix live and candle rules or different candle timeframes. Candle steps wait for a newly closed candle after activation; old closed candles are not evaluated.
 - No hardcoded list length; available memory is the practical limit. At least one row is required.
-- Only full completion alerts. Intermediate results go to Experts; chart text shows the current step.
-- OneShot=true stops after one final alert. Reattach to rearm. False restarts immediately. For a single "is in" condition, False can repeatedly alert on every tick; keep True initially.
+- Only full completion alerts. Intermediate results go to Experts; the panel shows the current step.
+- OneShot=true stops after one final alert. Resume & Restart rearms the applied list; Apply rearms using the draft. False restarts immediately. For a single "is in" condition, False can repeatedly alert on every tick; keep True initially.
 - SequenceTimeoutMinutes=0 disables expiry. A positive value sets a total deadline from the first passed condition. Expiry resets the list.
 - ResetAfterTickGapSeconds=300 resets progress after five minutes without received ticks. It cannot distinguish quiet markets from disconnection. Set 0 to disable; unobserved prices cannot be reconstructed.
-- Restart/reinitialisation clears progress. No missed-candle replay is performed. Broker candle times determine closes.
+- Apply, Resume and restart/reinitialisation clear progress. Resume does not pretend to recover events missed while paused. No missed-candle replay is performed. Broker candle times determine closes.
 - No trend filter, zone invalidation, position sizing or automatic entry is imposed.
 - Push attempts are limited to one per six seconds per instance. Suppressed/failed sends are logged, not queued/retried. Use one instance initially: MT5 limits apply across the terminal. Strategy Tester does not deliver phone alerts.
 
@@ -58,6 +63,6 @@ Select TRADED_ABOVE for the second row if no return below is required. Supported
 
 ## Verification
 
-MetaEditor compilation passed with 0 errors and 0 warnings. Browser checks passed for adding/removing/reordering rows, rule selection, validation, export data generation, import, draft persistence and mobile layout. Browser file downloads were blocked in the test environment, so export contents were checked before download; actual save delivery was not verified. The EA has not been run in MT5 Strategy Tester or against market data.
+MetaEditor compilation passed with 0 errors and 0 warnings. The on-chart panel has not been exercised interactively against a running MT5 chart in this workspace, and the monitor has not been run against market data. Verify native control interactions, persistence and notification delivery on a demo chart.
 
-Compile in MetaEditor and test on demo before relying on alerts. For live sequences, use real-tick modelling in Strategy Tester; candle-only data cannot establish intrabar event order. Check reversed-order events, starting inside, boundaries, sweep memory, mixed timeframes, timeout, tick gaps, one-shot and reload. Test phone delivery separately. Compiler/editor checks do not establish profitability or verify broker behaviour.
+Test on a demo chart: start with no CSV; add a rule; change rules and mode; switch between conditions; preserve entered values; reorder/remove; reject an invalid Apply without changing the running list; use selected drawings; apply; pause; resume; rearm a completed signal; reinitialise and restore saved settings. Nonvisual Strategy Tester cannot operate the chart editor; use a demo chart for UI verification. For live sequences, real-tick data is needed to establish intrabar event order. Check boundaries, sweeps, mixed timeframes, timeout and tick gaps. Compiler checks do not establish profitability or verify broker behaviour.

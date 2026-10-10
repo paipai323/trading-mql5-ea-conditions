@@ -1,5 +1,5 @@
 #property strict
-#property version "1.11"
+#property version "1.12"
 #property description "On-chart condition editor. Alerts only; no order operations."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -11,6 +11,7 @@ input bool PopupAlerts=true;
 input bool PhoneNotifications=false;
 input bool OneShot=true;
 input bool ShowZonePreviews=true; // Draw draft zones; selected condition is orange
+input bool ShowPriceLevelPreviews=true; // Draw horizontal lines for draft level rules
 input int SequenceTimeoutMinutes=0; // 0 = no expiry
 input int ResetAfterTickGapSeconds=300; // 0 = disabled
 struct Condition
@@ -534,6 +535,7 @@ private:
       {
          string name=ObjectName(m_chart_id,i,0,-1);
          if(StringFind(name,m_name+"_DraftZone_")==0) continue;
+         if(StringFind(name,m_name+"_DraftLevel_")==0) continue;
          ENUM_OBJECT type=(ENUM_OBJECT)ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE);
          if((zone && type!=OBJ_RECTANGLE) || (!zone && type!=OBJ_HLINE)) continue;
          if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) continue;
@@ -625,6 +627,61 @@ public:
    void ClearZonePreviews()
    {
       if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
+      if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftLevel_",0,-1);
+   }
+   bool HandleLevelDrag(string name)
+   {
+      string prefix=m_name+"_DraftLevel_";
+      if(StringFind(name,prefix)!=0 || ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE)!=OBJ_HLINE) return false;
+      int row=(int)StringToInteger(StringSubstr(name,StringLen(prefix)));
+      if(row!=m_selected || row<0 || row>=ArraySize(draft)) return true;
+      CancelPick(); Capture();
+      double price=ObjectGetDouble(m_chart_id,name,OBJPROP_PRICE);
+      double tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(tickSize>0) price=MathRound(price/tickSize)*tickSize;
+      price=NormalizeDouble(price,_Digits);
+      ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
+      if(!KnownRule(draft[row].rule) || ZoneRule(draft[row].rule) || !MathIsValidNumber(price) || price<=0)
+      { FormMessage="Level not changed: price must be positive."; UpdateStatus(); return true; }
+      draft[row].level=DoubleToString(price,_Digits);
+      Fields(); Dirty(); return true;
+   }
+   void DrawLevelPreviews()
+   {
+      if(!m_ready || !ShowPriceLevelPreviews) return;
+      string prefix=m_name+"_DraftLevel_";
+      for(int o=ObjectsTotal(m_chart_id,0,OBJ_HLINE)-1;o>=0;o--)
+      {
+         string name=ObjectName(m_chart_id,o,0,OBJ_HLINE);
+         if(StringFind(name,prefix)!=0) continue;
+         int row=(int)StringToInteger(StringSubstr(name,StringLen(prefix)));
+         double level=0;
+         if(row<0 || row>=ArraySize(draft)) { ObjectDelete(m_chart_id,name); continue; }
+         if(!KnownRule(draft[row].rule) || ZoneRule(draft[row].rule) ||
+            !Number(draft[row].level,level) || level<=0) ObjectDelete(m_chart_id,name);
+      }
+      for(int i=0;i<ArraySize(draft);i++)
+      {
+         double level=0;
+         if(!KnownRule(draft[i].rule) || ZoneRule(draft[i].rule) ||
+            !Number(draft[i].level,level) || level<=0) continue;
+         string name=prefix+IntegerToString(i);
+         if(ObjectFind(m_chart_id,name)<0 && !ObjectCreate(m_chart_id,name,OBJ_HLINE,0,0,level))
+         { Print("Cannot draw price-level preview: ",GetLastError()); continue; }
+         bool selected=i==m_selected;
+         if(!selected) ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
+         if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) ObjectSetDouble(m_chart_id,name,OBJPROP_PRICE,level);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,selected ? clrOrange : clrDodgerBlue);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_WIDTH,selected ? 2 : 1);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_STYLE,STYLE_SOLID);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_BACK,true);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTABLE,selected);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_HIDDEN,true);
+         ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,"Draft condition "+IntegerToString(i+1)+
+                         " - "+draft[i].rule+"\nPrice level "+DoubleToString(level,_Digits)+
+                         (selected ? " - double-click, then drag" : ""));
+      }
+      ChartRedraw(m_chart_id);
    }
    bool HandleZoneDrag(string name)
    {
@@ -656,6 +713,7 @@ public:
    }
    void DrawZonePreviews()
    {
+      DrawLevelPreviews();
       if(!m_ready || !ShowZonePreviews) return;
       string prefix=m_name+"_DraftZone_";
       int first=(int)ChartGetInteger(m_chart_id,CHART_FIRST_VISIBLE_BAR);
@@ -880,7 +938,8 @@ void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reaso
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
 {
    if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);
-   if((id==CHARTEVENT_OBJECT_DRAG || id==CHARTEVENT_OBJECT_CHANGE) && panel.HandleZoneDrag(sparam)) return;
+   if(id==CHARTEVENT_OBJECT_DRAG || id==CHARTEVENT_OBJECT_CHANGE)
+      if(panel.HandleZoneDrag(sparam) || panel.HandleLevelDrag(sparam)) return;
    if(id==CHARTEVENT_CHART_CHANGE) panel.DrawZonePreviews();
    if(id==CHARTEVENT_MOUSE_WHEEL)
    {

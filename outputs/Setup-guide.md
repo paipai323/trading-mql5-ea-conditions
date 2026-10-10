@@ -26,6 +26,8 @@ Zone visualization: with ShowZonePreviews=true (default), every draft zone with 
 
 ## Rules
 
+Price-level visualization: ShowPriceLevelPreviews=true (default) draws a horizontal line for each valid positive draft level used by trades-above/below, sweep, candle-close or crossing rules. The selected condition's line is orange; other level lines are blue. Double-click the selected line, then drag it vertically to update Price level on release. The price is rounded to the symbol tick size; nonpositive prices are rejected. Lines update when draft values/rules change and are removed when their condition is removed or changed to a zone rule. They appear behind the editor panel. Apply & Restart is required to change monitoring. Set ShowPriceLevelPreviews=false to hide level lines independently of zone previews.
+
 | Rule | Live Bid | Completed candle |
 | --- | --- | --- |
 | Enters zone | Previous observed Bid outside, current Bid inside | Previous candle range outside; latest range overlaps |

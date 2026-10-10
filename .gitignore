@@ -1,0 +1,12 @@
+# Scratch files
+work/
+
+# Generated MT5 binaries and compiler logs
+*.ex5
+*.log
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

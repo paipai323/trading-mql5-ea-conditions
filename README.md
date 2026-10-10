@@ -7,7 +7,7 @@ An alerts-only MetaTrader 5 Expert Advisor for manually configured candle and pr
 - `outputs/PriceConditionAlerts.mq5`: MQL5 source.
 - `outputs/Setup-guide.md`: installation, rule definitions, operating limits, and testing instructions.
 
-Supported conditions include candle closes, crossings, sweeps, zone contact, and a zone → sweep → shift sequence.
+Supported conditions include candle closes, crossings, sweeps, and zone contact.
 
 Compile the source in MetaEditor to produce the `.ex5` file. Generated binaries, compiler logs, and scratch files are excluded from Git.
 

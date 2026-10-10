@@ -1,5 +1,5 @@
 #property strict
-#property version "1.09"
+#property version "1.10"
 #property description "On-chart condition editor. Alerts only; no order operations."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -252,6 +252,16 @@ private:
    CComboBox m_rule,m_mode,m_timeframe,m_pick_target;
    CButton m_list_toggle;
    bool m_list_expanded;
+   bool m_scroll_blocked,m_previous_scroll;
+   bool OverDropdown(CComboBox &combo,int x,int y)
+   {
+      for(int i=0;i<combo.ControlsTotal();i++)
+      {
+         CListView *list=dynamic_cast<CListView *>(combo.Control(i));
+         if(list!=NULL && list.IsVisible() && list.Contains(x,y)) return true;
+      }
+      return false;
+   }
    CEdit m_level,m_low,m_high;
    CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import,m_drawing,m_pick;
    CLabel m_select_label,m_rule_label,m_mode_label,m_tf_label;
@@ -567,7 +577,30 @@ protected:
    virtual void OnClickButtonMinMax(void)
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
-   CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; }
+   CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; m_scroll_blocked=false; m_previous_scroll=true; }
+   void RestoreChartScroll()
+   {
+      if(!m_scroll_blocked) return;
+      ChartSetInteger(m_chart_id,CHART_MOUSE_SCROLL,m_previous_scroll);
+      m_scroll_blocked=false;
+   }
+   void HandlePointer(int x,int y)
+   {
+      bool over=Contains(x,y) || OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
+                OverDropdown(m_timeframe,x,y) || OverDropdown(m_pick_target,x,y);
+      if(over)
+      {
+         if(!m_scroll_blocked)
+         {
+            m_previous_scroll=(bool)ChartGetInteger(m_chart_id,CHART_MOUSE_SCROLL);
+            m_scroll_blocked=true;
+         }
+         // The native dialog can re-enable chart scrolling after a drag ends.
+         if(ChartGetInteger(m_chart_id,CHART_MOUSE_SCROLL))
+         { ChartSetInteger(m_chart_id,CHART_MOUSE_SCROLL,false); ChartRedraw(m_chart_id); }
+      }
+      else RestoreChartScroll();
+   }
    void ClearZonePreviews()
    {
       if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
@@ -818,18 +851,25 @@ int OnInit()
    if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,505) || !panel.Run())
    { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_WHEEL,true);
+   ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_MOVE,true);
    Print("On-chart editor ready for ",_Symbol,". Monitoring paused; no orders will be sent.");
    return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reason); Comment(""); }
+void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reason); panel.RestoreChartScroll(); Comment(""); }
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
 {
+   if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);
    if((id==CHARTEVENT_OBJECT_DRAG || id==CHARTEVENT_OBJECT_CHANGE) && panel.HandleZoneDrag(sparam)) return;
    if(id==CHARTEVENT_CHART_CHANGE) panel.DrawZonePreviews();
-   if(id==CHARTEVENT_MOUSE_WHEEL && panel.HandleWheel(lparam,dparam)) return;
+   if(id==CHARTEVENT_MOUSE_WHEEL)
+   {
+      panel.HandlePointer((int)(short)lparam,(int)(short)(lparam>>16));
+      if(panel.HandleWheel(lparam,dparam)) return;
+   }
    if(id==CHARTEVENT_CLICK && panel.HandlePriceClick((int)lparam,(int)dparam)) return;
    if(id==CHARTEVENT_KEYDOWN && lparam==27 && panel.HandleEscape()) return;
    panel.ChartEvent(id,lparam,dparam,sparam);
+   if(id==CHARTEVENT_MOUSE_MOVE) panel.HandlePointer((int)lparam,(int)dparam);
 }
 void OnTick()
 {

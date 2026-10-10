@@ -22,6 +22,8 @@ To pick a price directly, choose Price level, Zone low or Zone high from the dro
 
 Phone alerts: find your MetaQuotes ID in MT5 mobile; enter it in desktop Tools > Options > Notifications, enable notifications and Test. Set PhoneNotifications=true in the EA. Messages go to MT5 mobile, not the Exness app.
 
+Zone visualization: with ShowZonePreviews=true (default), every draft zone with valid positive low/high bounds appears as an outline rectangle on the main chart. The condition selected for editing is orange; other draft zones are blue. Rectangles update after editing a bound, picking prices, copying a drawing, switching conditions, importing, reordering or removing rows. Invalid/empty zones have no preview. They span the visible chart history and extend 20 chart bars beyond the latest bar, refreshing when the chart view changes or a new bar starts; those time boundaries are visual only. The previews show draft settings, including unapplied edits, not monitoring progress. Apply & Restart is still required to change the running conditions. Select a zone condition in the list to reveal its two orange dashed boundary lines. Double-click a low/high line to select it, then drag it vertically. On release the EA rounds the price to the symbol tick size, updates that draft input and redraws the rectangle. Low must remain positive and below high; invalid moves are rejected. The rectangle itself remains fixed in time. Apply & Restart is still required to use dragged bounds for monitoring. The EA removes only its own previews when detached. Set ShowZonePreviews=false to hide them.
+
 ## Rules
 
 | Rule | Live Bid | Completed candle |

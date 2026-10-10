@@ -1,5 +1,5 @@
 #property strict
-#property version "1.06"
+#property version "1.09"
 #property description "On-chart condition editor. Alerts only; no order operations."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -10,6 +10,7 @@ input string ConditionsFile="conditions.csv"; // Optional import, not required o
 input bool PopupAlerts=true;
 input bool PhoneNotifications=false;
 input bool OneShot=true;
+input bool ShowZonePreviews=true; // Draw draft zones; selected condition is orange
 input int SequenceTimeoutMinutes=0; // 0 = no expiry
 input int ResetAfterTickGapSeconds=300; // 0 = disabled
 struct Condition
@@ -429,7 +430,7 @@ private:
    {
       int selection=(int)m_condition.Value();
       if(selection==m_selected || selection<0 || selection>=ArraySize(draft)) return;
-      CancelPick(); Capture(); m_selected=selection; Fields(); ChartRedraw();
+      CancelPick(); Capture(); m_selected=selection; Fields(); DrawZonePreviews(); ChartRedraw();
    }
    void OnRule()
    {
@@ -522,6 +523,7 @@ private:
       for(int i=0;i<total;i++)
       {
          string name=ObjectName(m_chart_id,i,0,-1);
+         if(StringFind(name,m_name+"_DraftZone_")==0) continue;
          ENUM_OBJECT type=(ENUM_OBJECT)ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE);
          if((zone && type!=OBJ_RECTANGLE) || (!zone && type!=OBJ_HLINE)) continue;
          if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) continue;
@@ -566,6 +568,112 @@ protected:
    { if(m_minimized) Maximize(); else Minimize(); SubwinOff(); }
 public:
    CConditionPanel() { m_selected=-1; m_ready=false; m_picking=false; m_pick_field=0; }
+   void ClearZonePreviews()
+   {
+      if(m_name!="") ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
+   }
+   bool HandleZoneDrag(string name)
+   {
+      string prefix=m_name+"_DraftZone_";
+      if(StringFind(name,prefix)!=0 || ObjectGetInteger(m_chart_id,name,OBJPROP_TYPE)!=OBJ_HLINE)
+         return false;
+      string suffix=StringSubstr(name,StringLen(prefix));
+      int row=(int)StringToInteger(suffix);
+      if(row!=m_selected || row<0 || row>=ArraySize(draft)) return true;
+      bool isLow=suffix==IntegerToString(row)+"_Low";
+      if(!isLow && suffix!=IntegerToString(row)+"_High") return true;
+      CancelPick(); Capture();
+      double price=ObjectGetDouble(m_chart_id,name,OBJPROP_PRICE);
+      double tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(tickSize>0) price=MathRound(price/tickSize)*tickSize;
+      price=NormalizeDouble(price,_Digits);
+      double low=0,high=0;
+      bool valid=ZoneRule(draft[row].rule) && Number(draft[row].low,low) && Number(draft[row].high,high);
+      if(isLow) low=price; else high=price;
+      ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
+      if(!valid || !MathIsValidNumber(price) || low<=0 || high<=low)
+      {
+         FormMessage="Boundary not changed: zone low must be positive and below zone high.";
+         UpdateStatus(); return true;
+      }
+      if(isLow) draft[row].low=DoubleToString(low,_Digits);
+      else draft[row].high=DoubleToString(high,_Digits);
+      Fields(); Dirty(); return true;
+   }
+   void DrawZonePreviews()
+   {
+      if(!m_ready || !ShowZonePreviews) return;
+      string prefix=m_name+"_DraftZone_";
+      int first=(int)ChartGetInteger(m_chart_id,CHART_FIRST_VISIBLE_BAR);
+      datetime left=iTime(_Symbol,_Period,MathMax(0,first));
+      datetime current=iTime(_Symbol,_Period,0);
+      if(left==0 || current==0) return;
+      datetime right=current+(datetime)(PeriodSeconds(_Period)*20);
+      // Only the selected condition has draggable boundary lines.
+      double selectedLow=0,selectedHigh=0;
+      bool handles=m_selected>=0 && m_selected<ArraySize(draft);
+      if(handles) handles=ZoneRule(draft[m_selected].rule) && Number(draft[m_selected].low,selectedLow) &&
+                          Number(draft[m_selected].high,selectedHigh) && selectedLow>0 && selectedHigh>selectedLow;
+      for(int o=ObjectsTotal(m_chart_id,0,OBJ_HLINE)-1;o>=0;o--)
+      {
+         string name=ObjectName(m_chart_id,o,0,OBJ_HLINE);
+         if(StringFind(name,prefix)!=0) continue;
+         string expected=prefix+IntegerToString(m_selected);
+         if(!handles || (name!=expected+"_Low" && name!=expected+"_High")) ObjectDelete(m_chart_id,name);
+      }
+      // Remove only our previews whose draft row was deleted or is no longer a valid zone.
+      for(int o=ObjectsTotal(m_chart_id,0,OBJ_RECTANGLE)-1;o>=0;o--)
+      {
+         string name=ObjectName(m_chart_id,o,0,OBJ_RECTANGLE);
+         if(StringFind(name,prefix)!=0) continue;
+         int row=(int)StringToInteger(StringSubstr(name,StringLen(prefix)));
+         double low=0,high=0;
+         if(row<0 || row>=ArraySize(draft)) { ObjectDelete(m_chart_id,name); continue; }
+         if(!ZoneRule(draft[row].rule) || !Number(draft[row].low,low) ||
+            !Number(draft[row].high,high) || low<=0 || high<=low)
+            ObjectDelete(m_chart_id,name);
+      }
+      for(int i=0;i<ArraySize(draft);i++)
+      {
+         double low=0,high=0;
+         if(!ZoneRule(draft[i].rule) || !Number(draft[i].low,low) ||
+            !Number(draft[i].high,high) || low<=0 || high<=low) continue;
+         string name=prefix+IntegerToString(i);
+         if(ObjectFind(m_chart_id,name)<0 &&
+            !ObjectCreate(m_chart_id,name,OBJ_RECTANGLE,0,left,high,right,low))
+         { Print("Cannot draw zone preview: ",GetLastError()); continue; }
+         ObjectMove(m_chart_id,name,0,left,high); ObjectMove(m_chart_id,name,1,right,low);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,i==m_selected ? clrOrange : clrDodgerBlue);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_WIDTH,i==m_selected ? 2 : 1);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_FILL,false);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_BACK,true);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTABLE,false);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_HIDDEN,true);
+         ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,"Draft condition "+IntegerToString(i+1)+
+                         " - "+draft[i].rule+"\n"+DoubleToString(low,_Digits)+" to "+DoubleToString(high,_Digits));
+      }
+      if(handles)
+      {
+         for(int boundary=0;boundary<2;boundary++)
+         {
+            string name=prefix+IntegerToString(m_selected)+(boundary==0 ? "_Low" : "_High");
+            double price=boundary==0 ? selectedLow : selectedHigh;
+            if(ObjectFind(m_chart_id,name)<0 && !ObjectCreate(m_chart_id,name,OBJ_HLINE,0,0,price))
+            { Print("Cannot draw zone boundary: ",GetLastError()); continue; }
+            // Leave a selected handle alone until MT5 sends its drag/change event.
+            if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) ObjectSetDouble(m_chart_id,name,OBJPROP_PRICE,price);
+            ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,clrOrange);
+            ObjectSetInteger(m_chart_id,name,OBJPROP_STYLE,STYLE_DASH);
+            ObjectSetInteger(m_chart_id,name,OBJPROP_BACK,true);
+            ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTABLE,true);
+            ObjectSetInteger(m_chart_id,name,OBJPROP_HIDDEN,true);
+            ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,"Draft condition "+IntegerToString(m_selected+1)+
+                            (boundary==0 ? " zone low - double-click, then drag" : " zone high - double-click, then drag"));
+         }
+      }
+      ChartRedraw(m_chart_id);
+   }
    bool HandlePriceClick(int x,int y)
    {
       if(!m_picking) return false;
@@ -657,6 +765,7 @@ public:
       m_status.Text(status);
       m_message.Text(FormMessage);
       m_pause.Text(paused || finished ? "Resume & Restart" : "Pause");
+      DrawZonePreviews();
       ChartRedraw();
    }
    virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
@@ -712,9 +821,11 @@ int OnInit()
    Print("On-chart editor ready for ",_Symbol,". Monitoring paused; no orders will be sent.");
    return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { panel.Destroy(reason); Comment(""); }
+void OnDeinit(const int reason) { panel.ClearZonePreviews(); panel.Destroy(reason); Comment(""); }
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
 {
+   if((id==CHARTEVENT_OBJECT_DRAG || id==CHARTEVENT_OBJECT_CHANGE) && panel.HandleZoneDrag(sparam)) return;
+   if(id==CHARTEVENT_CHART_CHANGE) panel.DrawZonePreviews();
    if(id==CHARTEVENT_MOUSE_WHEEL && panel.HandleWheel(lparam,dparam)) return;
    if(id==CHARTEVENT_CLICK && panel.HandlePriceClick((int)lparam,(int)dparam)) return;
    if(id==CHARTEVENT_KEYDOWN && lparam==27 && panel.HandleEscape()) return;
@@ -722,6 +833,9 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 }
 void OnTick()
 {
+   static datetime previewBar=0;
+   datetime chartBar=iTime(_Symbol,_Period,0);
+   if(chartBar!=previewBar) { previewBar=chartBar; panel.DrawZonePreviews(); }
    if(paused || finished || ArraySize(conditions)==0) return;
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick) || tick.bid<=0) return;

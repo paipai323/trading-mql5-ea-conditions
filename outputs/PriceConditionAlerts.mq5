@@ -1,5 +1,5 @@
 #property strict
-#property version "1.22"
+#property version "1.24"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -84,11 +84,32 @@ bool EstimateEntry(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote,
    double maximum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    ENUM_ORDER_TYPE marketSide=BuyOrder(side) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double entry=PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid);
-   double adverse=entry+(BuyOrder(side) ? 1 : -1)*EntryDeviationPoints*_Point;
+   // Convert the unsigned input before applying a negative Sell direction.
+   double allowance=(double)EntryDeviationPoints*_Point;
+   double adverse=BuyOrder(side) ? entry+allowance : entry-allowance;
    double minLoss=0;
-   if(!MathIsValidNumber(budget) || budget<=0 || adverse<=0 ||
-      !OrderCalcProfit(marketSide,_Symbol,minimum,adverse,sl,minLoss) || !MathIsValidNumber(minLoss) || minLoss>=0)
-   { reason="Cannot calculate stop-loss risk."; return false; }
+   if(!MathIsValidNumber(budget) || budget<=0)
+   { reason="Cannot size trade: account equity is zero or unavailable."; return false; }
+   if(!MathIsValidNumber(adverse) || adverse<=0 || !MathIsValidNumber(minimum) || minimum<=0)
+   { reason="Cannot size trade: entry price or broker minimum lot unavailable."; return false; }
+   ResetLastError();
+   if(!OrderCalcProfit(marketSide,_Symbol,minimum,adverse,sl,minLoss))
+   {
+      int error=GetLastError();
+      reason="MT5 stop-loss calculation failed: error "+IntegerToString(error)+" (see Experts).";
+      static int priorError=-1; static datetime lastReport=0;
+      if(error!=priorError || TimeLocal()-lastReport>=30)
+      {
+         Print(reason," symbol=",_Symbol," side=",EnumToString(marketSide)," min lots=",minimum,
+               " entry=",adverse," SL=",sl," tick size=",SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE),
+               " contract size=",SymbolInfoDouble(_Symbol,SYMBOL_TRADE_CONTRACT_SIZE),
+               " account currency=",AccountInfoString(ACCOUNT_CURRENCY));
+         priorError=error; lastReport=TimeLocal();
+      }
+      return false;
+   }
+   if(!MathIsValidNumber(minLoss) || minLoss>=0)
+   { reason="MT5 returned no SL loss: "+DoubleToString(minLoss,8)+". Check symbol pricing/specifications."; return false; }
    if(manual && !ValidManualLots(manualLots)) { reason="Manual lots must meet broker min/max and lot step."; return false; }
    volume=manual ? manualLots : RiskVolume(budget,-minLoss,minimum,step,maximum);
    if(volume==0) { reason="Broker minimum lot cannot fit the 2% risk budget."; return false; }

@@ -1,0 +1,4 @@
+rule,mode,timeframe,level,zone_low,zone_high
+ZONE_ENTER,LIVE,H1,0,1.08,1.081
+SWEEP_ABOVE_REJECT,LIVE,H1,1.082,0,0
+ZONE_TOUCH,LIVE,H1,0,1.08,1.081

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My trading conditions</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f5f8;color:#182537;font:16px system-ui,sans-serif}main{max-width:1050px;margin:45px auto;padding:0 24px}h1{font-size:32px;margin-bottom:8px}p{line-height:1.6;color:#526174}.toolbar,.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.toolbar{margin:24px 0}button,.import{border:1px solid #bcc9d8;border-radius:8px;background:white;padding:10px 14px;cursor:pointer;font:inherit;color:#18324c}button.primary{background:#17634f;color:white;border-color:#17634f}button:disabled{opacity:.4;cursor:default}.card{background:white;border:1px solid #dce3eb;border-radius:12px;padding:20px;margin:16px 0}.head{display:flex;justify-content:space-between;gap:12px;align-items:center}.head h2{font-size:18px;margin:0}.grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin:20px 0}label{display:block;color:#435167;font-size:14px}select,input{display:block;width:100%;padding:10px;margin-top:6px;border:1px solid #b9c6d5;border-radius:6px;background:white;font:inherit;color:#182537}.parameters{display:grid;grid-template-columns:1fr 1fr;gap:14px}.hint{font-size:14px;margin:12px 0 0}.note{background:#e8f2ed;border-radius:10px;padding:16px;color:#214d3e}#status{min-height:24px;color:#a33434;white-space:pre-line}.empty{text-align:center;padding:36px}.foot{margin:30px 0}.small{font-size:13px}input[type=file]{display:none}@media(max-width:650px){.grid,.parameters{grid-template-columns:1fr}.head{align-items:flex-start;flex-direction:column}main{margin-top:24px}.actions button{padding:8px}}
+</style>
+<main>
+<h1>My trading conditions</h1>
+<p>Add conditions, choose a rule for each, and put them in the order you want.<br>MT5 alerts you once all conditions have passed. This editor does not connect to your account.</p>
+<div class="note">Your example: enter a zone → sweep above a level → return to a zone.<br>Live rules use Bid prices. Completed-candle rules wait for the selected candle to close.</div>
+<div class="toolbar">
+<button id="add" class="primary">+ Add condition</button>
+<button id="example">Load example</button>
+<label class="import">Import configuration<input id="import" type="file" accept=".csv,text/csv"></label>
+<button id="download">Export for MT5</button>
+</div>
+<div id="status" role="status" aria-live="polite"></div>
+<div id="conditions"></div>
+<div class="foot card">
+<h2>Use your conditions in MT5</h2>
+<ol><li>Export <strong>conditions.csv</strong>.</li><li>In desktop MT5, select <strong>File → Open Data Folder</strong>. Copy the CSV into <strong>MQL5/Files</strong>.</li><li>Copy <strong>PriceConditionAlerts.ex5</strong> into <strong>MQL5/Experts</strong>, refresh Navigator, then attach it to your symbol.</li><li>Keep MT5 connected and running. After changing the CSV, reattach the EA to load it and start from condition 1.</li></ol>
+<p class="small">Each condition requires a separate update, in order. Earlier conditions stay satisfied. OneShot defaults to one final alert; there is no automatic entry. Example prices are illustrative and must be replaced with your own levels.</p>
+</div>
+</main>
+<script>
+'use strict';
+const rules=[
+ ['ZONE_ENTER','Enters my zone','zone','Price moves from outside to inside the zone. In candle mode, the latest range overlaps the zone and the previous range does not.'],
+ ['ZONE_TOUCH','Is in / touches my zone','zone','Live: current Bid is inside the zone. Candle: the candle range overlaps the zone.'],
+ ['TRADED_ABOVE','Trades above my level','level','Price goes above the level. No return below is required. Candle mode checks the high.'],
+ ['TRADED_BELOW','Trades below my level','level','Price goes below the level. No return above is required. Candle mode checks the low.'],
+ ['SWEEP_ABOVE_REJECT','Sweeps above, then returns below','level','Live: observe Bid above then below while this step is active. Candle: high above and close below in one candle.'],
+ ['SWEEP_BELOW_RECLAIM','Sweeps below, then returns above','level','Live: observe Bid below then above while this step is active. Candle: low below and close above in one candle.'],
+ ['CLOSE_ABOVE','Candle closes above my level','level','Completed candle closes strictly above the level.'],
+ ['CLOSE_BELOW','Candle closes below my level','level','Completed candle closes strictly below the level.'],
+ ['CROSS_ABOVE','First candle close above my level','level','Previous close at/below, latest close above.'],
+ ['CROSS_BELOW','First candle close below my level','level','Previous close at/above, latest close below.'],
+ ['CLOSE_IN_ZONE','Candle closes inside my zone','zone','Completed candle closes within the inclusive zone boundaries.']
+];
+const tfs=['M1','M5','M15','M30','H1','H4','D1'];
+const candleOnly=r=>r.startsWith('CLOSE_')||r.startsWith('CROSS_');
+const fresh=()=>({rule:'ZONE_ENTER',mode:'LIVE',timeframe:'H1',level:'',zone_low:'',zone_high:''});
+const example=()=>[
+ {...fresh(),zone_low:'1.0800',zone_high:'1.0810'},
+ {...fresh(),rule:'SWEEP_ABOVE_REJECT',level:'1.0820'},
+ {...fresh(),rule:'ZONE_TOUCH',zone_low:'1.0800',zone_high:'1.0810'}
+];
+let conditions=example();
+const status=message=>{document.querySelector('#status').textContent=message;};
+function persist(){try{localStorage.setItem('mt5-custom-conditions-v1',JSON.stringify(conditions));}catch{}}
+function validate(list){
+ if(!list.length)throw Error('Add at least one condition.');
+ list.forEach((c,i)=>{
+  const r=rules.find(r=>r[0]===c.rule); const name='Condition '+(i+1)+': ';
+  if(!r||!['LIVE','CANDLE'].includes(c.mode)||!tfs.includes(c.timeframe))throw Error(name+'invalid rule, mode or timeframe.');
+  if(candleOnly(c.rule)&&c.mode!=='CANDLE')throw Error(name+'this rule requires completed candles.');
+  const validNumber=v=>/^\d+(\.\d+)?$/.test(String(v))&&Number.isFinite(Number(v));
+  if(r[2]==='zone'){
+   if(!validNumber(c.zone_low)||!validNumber(c.zone_high)||Number(c.zone_low)<=0||Number(c.zone_high)<=Number(c.zone_low))throw Error(name+'enter a positive zone low and a larger zone high.');
+  }else if(!validNumber(c.level)||Number(c.level)<=0)throw Error(name+'enter a positive price level.');
+ });
+ return list;
+}
+function serialize(list){
+ validate(list);
+ return 'rule,mode,timeframe,level,zone_low,zone_high\r\n'+list.map(c=>{
+  const zone=rules.find(r=>r[0]===c.rule)[2]==='zone';
+  return [c.rule,c.mode,c.timeframe,zone?'0':c.level,zone?c.zone_low:'0',zone?c.zone_high:'0'].join(',');
+ }).join('\r\n')+'\r\n';
+}
+function parse(text){
+ const lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).map(l=>l.trim()).filter(l=>l&&!l.startsWith('#'));
+ if(lines.shift()!=='rule,mode,timeframe,level,zone_low,zone_high')throw Error('Unrecognised configuration header.');
+ return validate(lines.map(line=>{
+  const fields=line.split(',').map(s=>s.trim());
+  if(fields.length!==6)throw Error('Each condition needs six CSV fields.');
+  const [rule,mode,timeframe,level,zone_low,zone_high]=fields;
+  return {rule,mode,timeframe,level,zone_low,zone_high};
+ }));
+}
+function render(){
+ const host=document.querySelector('#conditions');host.replaceChildren();
+ if(!conditions.length){const empty=document.createElement('div');empty.className='card empty';empty.textContent='No conditions yet. Click + Add condition to begin.';host.append(empty);}
+ conditions.forEach((c,i)=>{
+  const card=document.createElement('section');card.className='card';
+  card.innerHTML='<div class="head"><h2></h2><div class="actions"><button data-action="up">↑ Move up</button><button data-action="down">↓ Move down</button><button data-action="remove">Remove</button></div></div><div class="grid"></div><div class="parameters"></div><p class="hint"></p>';
+  card.querySelector('h2').textContent='Condition '+(i+1);
+  card.querySelector('[data-action=up]').disabled=i===0;
+  card.querySelector('[data-action=down]').disabled=i===conditions.length-1;
+  card.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>{
+   const action=b.dataset.action;
+   if(action==='remove')conditions.splice(i,1);
+   else {const j=action==='up'?i-1:i+1;[conditions[i],conditions[j]]=[conditions[j],conditions[i]];}
+   persist();status('');render();
+  });
+  function select(label,key,options,disabled=false){
+   const wrapper=document.createElement('label');wrapper.textContent=label;
+   const el=document.createElement('select');el.setAttribute('aria-label','Condition '+(i+1)+' '+label);
+   options.forEach(([value,text])=>{const option=document.createElement('option');option.value=value;option.textContent=text;el.append(option);});
+   el.value=c[key];el.disabled=disabled;
+   el.onchange=()=>{c[key]=el.value;if(candleOnly(c.rule))c.mode='CANDLE';persist();status('');render();};
+   wrapper.append(el);card.querySelector('.grid').append(wrapper);
+  }
+  select('Rule','rule',rules.map(r=>[r[0],r[1]]));
+  select('Evaluate','mode',[['LIVE','Live price'],['CANDLE','Completed candle']],candleOnly(c.rule));
+  select('Timeframe','timeframe',tfs.map(t=>[t,t]),c.mode==='LIVE');
+  const spec=rules.find(r=>r[0]===c.rule);
+  const inputs=spec[2]==='zone'?[['Zone low','zone_low'],['Zone high','zone_high']]:[['Price level','level']];
+  inputs.forEach(([label,key])=>{
+   const wrapper=document.createElement('label');wrapper.textContent=label;
+   const el=document.createElement('input');el.type='number';el.min='0';el.step='any';el.value=c[key];el.placeholder='Enter your price';el.setAttribute('aria-label','Condition '+(i+1)+' '+label);
+   el.oninput=()=>{c[key]=el.value;persist();status('');};wrapper.append(el);card.querySelector('.parameters').append(wrapper);
+  });
+  card.querySelector('.hint').textContent=spec[3]+(c.mode==='LIVE'?' No candle-close wait.':'');
+  host.append(card);
+ });
+ document.querySelector('#download').disabled=conditions.length===0;
+}
+document.querySelector('#add').onclick=()=>{conditions.push(fresh());persist();status('');render();};
+document.querySelector('#example').onclick=()=>{if(confirm('Replace the current conditions with illustrative example prices?')){conditions=example();persist();status('Replace example prices before use.');render();}};
+document.querySelector('#download').onclick=()=>{
+ try{const csv=serialize(conditions);const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='conditions.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status('Exported. Copy the file into MT5 MQL5/Files and reattach the EA.');}catch(e){status(e.message);}
+};
+document.querySelector('#import').onchange=async event=>{
+ const file=event.target.files[0];if(!file)return;
+ try{const loaded=parse(await file.text());conditions=loaded;persist();render();status('Configuration imported.');}catch(e){status(e.message);}finally{event.target.value='';}
+};
+try{const saved=localStorage.getItem('mt5-custom-conditions-v1');if(saved){const draft=JSON.parse(saved);if(Array.isArray(draft)&&draft.every(c=>c&&rules.some(r=>r[0]===c.rule)&&['LIVE','CANDLE'].includes(c.mode)&&tfs.includes(c.timeframe)))conditions=draft;}}catch{}
+render();
+</script>
+</html>

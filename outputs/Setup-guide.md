@@ -1,45 +1,63 @@
-# MT5 price-condition alerts
+# Custom MT5 condition alerts
 
-This Expert Advisor monitors the chart symbol. It never submits, modifies, or closes orders. It does not identify trends, zones or profitable setups: you supply the levels.
+PriceConditionAlerts now reads your own ordered condition list. It never places orders. There are no fixed three slots and no preset trading strategy.
 
-## Installation
+## Create and use conditions
 
-1. In desktop MT5, choose File > Open Data Folder.
-2. Copy PriceConditionAlerts.mq5 into MQL5/Experts.
-3. Open it in MetaEditor and press F7 to compile. Resolve any compiler errors before use.
-4. Refresh Expert Advisors in Navigator and attach it to your chosen symbol (for example EURUSDc on Standard Cent). The chart timeframe does not control the rule timeframe.
-5. Enter valid levels in Inputs. The default PriceLevel is zero so it intentionally will not start until configured.
-6. Keep the terminal connected and running. The mobile app cannot host this EA.
+1. Open condition-editor.html in a browser. Add/remove rows, choose a rule for each, set prices and reorder with Move up/down. Each row supports live Bid or completed candles, with its own candle timeframe.
+2. Replace the illustrative example prices. Export conditions.csv. Import restores an exported list. Drafts are saved in browser storage where available.
+3. In desktop MT5 select File > Open Data Folder. Copy the CSV into MQL5/Files; ensure its filename is conditions.csv (repeated downloads can append a number).
+4. Copy PriceConditionAlerts.ex5 into MQL5/Experts. Refresh Navigator and attach the EA to your exact symbol. Source can alternatively be compiled with MetaEditor.
+5. Keep ConditionsFile=conditions.csv and OneShot=true initially. Keep desktop MT5 connected and running; the editor can close.
+6. After changing the CSV, replace it and reattach the EA. Reloading restarts at condition 1; it is not automatic.
 
-For phone alerts, install the MT5 mobile app, find its MetaQuotes ID, then enter it in desktop Tools > Options > Notifications. Enable notifications and use the built-in Test button. Set PhoneNotifications=true in the EA. Push messages go to MT5 mobile, not the Exness app. Signals and delivery failures are also printed in the Experts log.
+The HTML is a local configuration editor, not an account connection. Copying the CSV is necessary because MT5 reads its file sandbox. See https://www.mql5.com/en/docs/files/fileopen.
 
-## Individual rules
+Phone alerts: find your MetaQuotes ID in MT5 mobile; enter it in desktop Tools > Options > Notifications, enable notifications and Test. Set PhoneNotifications=true in the EA. Messages go to MT5 mobile, not the Exness app.
 
-- CLOSE_BELOW / CLOSE_ABOVE: completed candle closes strictly beyond PriceLevel.
-- CROSS_BELOW / CROSS_ABOVE: previous close is on the other side or equal; latest close is strictly beyond the level.
-- SWEEP_BELOW_RECLAIM: same candle has low < level and close > level.
-- SWEEP_ABOVE_REJECT: same candle has high > level and close < level.
-- ZONE_TOUCH: completed candle overlaps the inclusive ZoneLow–ZoneHigh interval. This reports at candle close, not at the moment of contact.
+## Rules
 
-RuleTimeframe defaults to H4 and applies to individual rules. Price equality does not qualify as a close beyond or a sweep.
+| Rule | Live Bid | Completed candle |
+| --- | --- | --- |
+| Enters zone | Previous observed Bid outside, current Bid inside | Previous candle range outside; latest range overlaps |
+| Is in / touches zone | Bid inside | Candle range overlaps |
+| Trades above / below | Bid strictly above / below | High above / low below |
+| Sweeps above, returns below | Observe above then below while this step is active | High above and close below in one candle |
+| Sweeps below, returns above | Observe below then above while active | Low below and close above in one candle |
+| Candle closes above / below | Unavailable | Close strictly beyond level |
+| First candle close above / below | Unavailable | Previous close other side or equal, latest beyond |
+| Candle closes inside zone | Unavailable | Close inside inclusive zone |
 
-## Operating limits
+Live rules use Bid, not Ask or Last. Zone boundaries are inclusive; level comparisons are strict. Jumping over the entire zone does not count as entering. Starting inside does not count as entering—choose "is in" if presence should qualify (checked after the baseline tick).
 
-- OneShot=true produces one signal per attachment. Remove and reattach to rearm. False permits one signal per qualifying closed candle.
-- First available closed candles are used only to initialise tracking; no historical signal is sent on startup.
-- State is held in memory. Restarting, changing inputs or changing chart settings resets it. It does not replay missed bars after disconnection, so candles that closed during downtime may not be checked.
-- Evaluation occurs on incoming ticks after candle close. Bar timestamps in messages are broker candle opening times, not Thailand time or notification time.
-- No time-of-day restriction: monitoring runs all day, consistent with alerts-only use. A signal does not mean you should enter late after work.
-- Push delivery is best effort; failed sends are logged without retry. Use only one active instance initially to avoid platform notification-rate limits. Popup/push delivery cannot be assessed by the Strategy Tester; inspect journal signals there.
-- No lot sizing, stop/target recommendation or trading is included.
+## Behaviour and limits
 
-## Verification before use
+- Conditions are evaluated in list order; only the active step is monitored. Passed steps remain satisfied. Each step requires a separate tick/evaluation. Prior sweeps do not count for a newly activated step.
+- Rows can mix live and candle rules or different candle timeframes. Candle steps wait for a newly closed candle after activation; old closed candles are not evaluated.
+- No hardcoded list length; available memory is the practical limit. At least one row is required.
+- Only full completion alerts. Intermediate results go to Experts; chart text shows the current step.
+- OneShot=true stops after one final alert. Reattach to rearm. False restarts immediately. For a single "is in" condition, False can repeatedly alert on every tick; keep True initially.
+- SequenceTimeoutMinutes=0 disables expiry. A positive value sets a total deadline from the first passed condition. Expiry resets the list.
+- ResetAfterTickGapSeconds=300 resets progress after five minutes without received ticks. It cannot distinguish quiet markets from disconnection. Set 0 to disable; unobserved prices cannot be reconstructed.
+- Restart/reinitialisation clears progress. No missed-candle replay is performed. Broker candle times determine closes.
+- No trend filter, zone invalidation, position sizing or automatic entry is imposed.
+- Push attempts are limited to one per six seconds per instance. Suppressed/failed sends are logged, not queued/retried. Use one instance initially: MT5 limits apply across the terminal. Strategy Tester does not deliver phone alerts.
 
-The source was compiled with the installed MetaEditor: 0 errors and 0 warnings. The compiled PriceConditionAlerts.ex5 is included. It has not been run against live market data or verified in Strategy Tester. Test on a demo connection before relying on signals.
+## Configuration format
 
-Use Strategy Tester visual mode with historical data and Journal output. Pick levels from an earlier chart segment, then check: first crossing vs repeated closes; wick-only sweeps; exact equality; zone boundary touches; and no duplicate signal on additional ticks. Run different rules separately. Finally test phone delivery with a running demo terminal. These checks verify behaviour, not profitability.
+UTF-8, six comma-separated fields per condition. Unused numeric fields are zero:
 
-References:
-- https://www.mql5.com/en/docs/network/sendnotification
-- https://www.mql5.com/en/docs/series/copyrates
-- https://get.exness.help/hc/en-us/articles/360019530859-Using-Expert-Advisors-EA
+```csv
+rule,mode,timeframe,level,zone_low,zone_high
+ZONE_ENTER,LIVE,H1,0,1.08,1.081
+SWEEP_ABOVE_REJECT,LIVE,H1,1.082,0,0
+ZONE_TOUCH,LIVE,H1,0,1.08,1.081
+```
+
+Select TRADED_ABOVE for the second row if no return below is required. Supported timeframes: M1, M5, M15, M30, H1, H4, D1 (ignored for LIVE). Blank/comment lines beginning with # are ignored. No quoted fields or thousands separators. Invalid rules, modes, numbers, zone bounds, live candle-close rules or empty lists prevent startup.
+
+## Verification
+
+MetaEditor compilation passed with 0 errors and 0 warnings. Browser checks passed for adding/removing/reordering rows, rule selection, validation, export data generation, import, draft persistence and mobile layout. Browser file downloads were blocked in the test environment, so export contents were checked before download; actual save delivery was not verified. The EA has not been run in MT5 Strategy Tester or against market data.
+
+Compile in MetaEditor and test on demo before relying on alerts. For live sequences, use real-tick modelling in Strategy Tester; candle-only data cannot establish intrabar event order. Check reversed-order events, starting inside, boundaries, sweep memory, mixed timeframes, timeout, tick gaps, one-shot and reload. Test phone delivery separately. Compiler/editor checks do not establish profitability or verify broker behaviour.

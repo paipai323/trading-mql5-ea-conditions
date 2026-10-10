@@ -1,6 +1,6 @@
 #property strict
-#property version "1.18"
-#property description "Ordered conditions with optional market entry and 2% equity risk."
+#property version "1.20"
+#property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
 #include <Controls\Button.mqh>
@@ -19,18 +19,39 @@ input uint EntryDeviationPoints=20; // Risk sizing includes this adverse price a
 input int EntryMaxSpreadPoints=0; // 0 = no spread filter
 bool autoEntry=false;
 ENUM_ORDER_TYPE entrySide=ORDER_TYPE_BUY;
-double entrySL=0,entryTP=0;
+double entrySL=0,entryTP=0,entryPendingPrice=0;
 string entryLock="";
+bool entryManualLots=false;
+double entryLots=0;
+bool ValidManualLots(double lots)
+{
+   double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),maximum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   return MathIsValidNumber(lots) && lots>=minimum && lots<=maximum && step>0 &&
+          MathAbs(lots/step-MathRound(lots/step))<0.0000001;
+}
 
 double TradePrice(double price)
 {
    double size=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    return size>0 ? NormalizeDouble(MathRound(price/size)*size,_Digits) : 0;
 }
-bool ValidEntryPrices(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote)
+bool BuyOrder(ENUM_ORDER_TYPE side) { return side==ORDER_TYPE_BUY || side==ORDER_TYPE_BUY_LIMIT || side==ORDER_TYPE_BUY_STOP; }
+bool PendingOrder(ENUM_ORDER_TYPE side) { return side>=ORDER_TYPE_BUY_LIMIT && side<=ORDER_TYPE_SELL_STOP; }
+bool ValidEntryPrices(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote,double pendingPrice=0)
 {
    if(!MathIsValidNumber(sl) || !MathIsValidNumber(tp) || sl<=0 || tp<=0 || quote.bid<=0 || quote.ask<=0) return false;
    double distance=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
+   if(PendingOrder(side))
+   {
+      if(!MathIsValidNumber(pendingPrice) || pendingPrice<=0) return false;
+      if(side==ORDER_TYPE_BUY_LIMIT && !(pendingPrice<quote.ask && quote.ask-pendingPrice>=distance)) return false;
+      if(side==ORDER_TYPE_SELL_LIMIT && !(pendingPrice>quote.bid && pendingPrice-quote.bid>=distance)) return false;
+      if(side==ORDER_TYPE_BUY_STOP && !(pendingPrice>quote.ask && pendingPrice-quote.ask>=distance)) return false;
+      if(side==ORDER_TYPE_SELL_STOP && !(pendingPrice<quote.bid && quote.bid-pendingPrice>=distance)) return false;
+      if(BuyOrder(side)) return sl<pendingPrice && tp>pendingPrice && pendingPrice-sl>=distance && tp-pendingPrice>=distance;
+      return sl>pendingPrice && tp<pendingPrice && sl-pendingPrice>=distance && pendingPrice-tp>=distance;
+   }
    if(side==ORDER_TYPE_BUY) return sl<quote.bid && quote.bid-sl>=distance && tp>quote.ask && tp-quote.bid>=distance;
    return sl>quote.ask && sl-quote.ask>=distance && tp<quote.bid && quote.ask-tp>=distance;
 }
@@ -54,25 +75,28 @@ double RiskVolume(double budget,double lossAtMin,double minimum,double step,doub
    return volume;
 }
 bool EstimateEntry(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote,
-                   double &volume,double &loss,double &gain,double &budget,string &reason)
+                   double &volume,double &loss,double &gain,double &budget,string &reason,double pendingPrice=0,
+                   bool manual=false,double manualLots=0)
 {
    volume=0; loss=0; gain=0; budget=AccountInfoDouble(ACCOUNT_EQUITY)*0.02;
-   if(!ValidEntryPrices(side,sl,tp,quote)) { reason="Set SL/TP on the correct sides, outside broker stop distance."; return false; }
+   if(!ValidEntryPrices(side,sl,tp,quote,pendingPrice)) { reason="Check entry/SL/TP sides and broker stop distances."; return false; }
    double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    double maximum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double entry=side==ORDER_TYPE_BUY ? quote.ask : quote.bid;
-   double adverse=entry+(side==ORDER_TYPE_BUY ? 1 : -1)*EntryDeviationPoints*_Point;
+   ENUM_ORDER_TYPE marketSide=BuyOrder(side) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double entry=PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid);
+   double adverse=entry+(BuyOrder(side) ? 1 : -1)*EntryDeviationPoints*_Point;
    double minLoss=0;
    if(!MathIsValidNumber(budget) || budget<=0 || adverse<=0 ||
-      !OrderCalcProfit(side,_Symbol,minimum,adverse,sl,minLoss) || !MathIsValidNumber(minLoss) || minLoss>=0)
+      !OrderCalcProfit(marketSide,_Symbol,minimum,adverse,sl,minLoss) || !MathIsValidNumber(minLoss) || minLoss>=0)
    { reason="Cannot calculate stop-loss risk."; return false; }
-   volume=RiskVolume(budget,-minLoss,minimum,step,maximum);
+   if(manual && !ValidManualLots(manualLots)) { reason="Manual lots must meet broker min/max and lot step."; return false; }
+   volume=manual ? manualLots : RiskVolume(budget,-minLoss,minimum,step,maximum);
    if(volume==0) { reason="Broker minimum lot cannot fit the 2% risk budget."; return false; }
    double pnl=0;
-   if(!OrderCalcProfit(side,_Symbol,volume,adverse,sl,pnl) || !MathIsValidNumber(pnl) || pnl>=0 || -pnl>budget)
+   if(!OrderCalcProfit(marketSide,_Symbol,volume,adverse,sl,pnl) || !MathIsValidNumber(pnl) || pnl>=0 || (!manual && -pnl>budget))
    { reason="Rounded volume exceeds risk budget or calculation unavailable."; return false; }
    loss=-pnl;
-   if(!OrderCalcProfit(side,_Symbol,volume,entry,tp,gain) || !MathIsValidNumber(gain) || gain<=0)
+   if(!OrderCalcProfit(marketSide,_Symbol,volume,entry,tp,gain) || !MathIsValidNumber(gain) || gain<=0)
    { reason="Cannot calculate take-profit estimate."; return false; }
    return true;
 }
@@ -88,22 +112,30 @@ void ExecuteEntry()
    // Keep the lock for 60 seconds even if the broker response is uncertain; never retry automatically.
    if(SymbolHasExposure()) { FormMessage="Entry skipped: this symbol already has a position or pending order."; return; }
    MqlTick quote;
-   if(!SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(entrySide,entrySL,entryTP,quote))
-   { FormMessage="Entry skipped: SL/TP invalid at the current quote or too close to market."; return; }
+   if(!SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(entrySide,entrySL,entryTP,quote,entryPendingPrice))
+   { FormMessage="Entry skipped: entry/SL/TP invalid at current quote or too close."; return; }
    if(EntryMaxSpreadPoints>0 && (quote.ask-quote.bid)/_Point>EntryMaxSpreadPoints)
    { FormMessage="Entry skipped: spread exceeds the configured limit."; return; }
-   double entry=entrySide==ORDER_TYPE_BUY ? quote.ask : quote.bid;
+   bool pending=PendingOrder(entrySide);
+   double entry=pending ? entryPendingPrice : (BuyOrder(entrySide) ? quote.ask : quote.bid);
    double volume=0,loss=0,gain=0,budget=0; string reason="";
-   if(!EstimateEntry(entrySide,entrySL,entryTP,quote,volume,loss,gain,budget,reason))
+   if(!EstimateEntry(entrySide,entrySL,entryTP,quote,volume,loss,gain,budget,reason,entryPendingPrice,entryManualLots,entryLots))
    { FormMessage="Entry skipped: "+reason; return; }
+   if(loss>budget) Print("WARNING: manual lot risk exceeds 2%: modeled loss=",loss," budget=",budget);
    MqlTradeRequest request={}; MqlTradeCheckResult check={}; MqlTradeResult result={};
-   request.action=TRADE_ACTION_DEAL; request.symbol=_Symbol; request.magic=EntryMagic;
+   request.action=pending ? TRADE_ACTION_PENDING : TRADE_ACTION_DEAL; request.symbol=_Symbol; request.magic=EntryMagic;
    request.type=entrySide; request.volume=volume; request.price=entry;
    request.sl=entrySL; request.tp=entryTP; request.deviation=EntryDeviationPoints;
    request.comment="PriceConditionAlerts";
    long filling=SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
    ENUM_SYMBOL_TRADE_EXECUTION execution=(ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_EXEMODE);
-   if(execution==SYMBOL_TRADE_EXECUTION_INSTANT || execution==SYMBOL_TRADE_EXECUTION_REQUEST ||
+   if(pending)
+   {
+      if((SymbolInfoInteger(_Symbol,SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_GTC)==0)
+      { FormMessage="Entry skipped: symbol does not support GTC pending orders."; return; }
+      request.type_filling=ORDER_FILLING_RETURN; request.type_time=ORDER_TIME_GTC;
+   }
+   else if(execution==SYMBOL_TRADE_EXECUTION_INSTANT || execution==SYMBOL_TRADE_EXECUTION_REQUEST ||
       (filling & SYMBOL_FILLING_FOK)!=0) request.type_filling=ORDER_FILLING_FOK;
    else if((filling & SYMBOL_FILLING_IOC)!=0) request.type_filling=ORDER_FILLING_IOC;
    else if(execution!=SYMBOL_TRADE_EXECUTION_MARKET) request.type_filling=ORDER_FILLING_RETURN;
@@ -113,7 +145,9 @@ void ExecuteEntry()
    Print("Entry request: ",EnumToString(entrySide)," volume=",volume,
          " budget=",budget," modeled SL loss=",loss," TP gain=",gain," SL=",entrySL," TP=",entryTP);
    bool sent=OrderSend(request,result);
-   if(sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL))
+   if(sent && pending && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_PLACED))
+      FormMessage="Pending order placed: "+EnumToString(entrySide)+" "+DoubleToString(volume,8)+" lots. Sequence stopped.";
+   else if(sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL))
       FormMessage="Entry executed: "+EnumToString(entrySide)+" "+DoubleToString(result.volume,8)+" lots. Sequence stopped.";
    else if(sent && result.retcode==TRADE_RETCODE_PLACED)
       FormMessage="Entry accepted, awaiting broker execution. Check Trade tab; no retry.";
@@ -358,7 +392,11 @@ class CConditionPanel : public CAppDialog
 private:
    CListView m_condition;
    CComboBox m_trade_side;
-   CEdit m_trade_sl,m_trade_tp;
+   CEdit m_trade_sl,m_trade_tp,m_trade_entry;
+   CLabel m_trade_entry_label;
+   CComboBox m_lot_mode;
+   CEdit m_manual_lots;
+   CLabel m_lot_mode_label,m_manual_lots_label;
    CLabel m_trade_side_label,m_trade_sl_label,m_trade_tp_label;
    CLabel m_trade_estimate,m_trade_budget;
    CButton m_trade_switch;
@@ -395,6 +433,9 @@ private:
       m_trade_side.Shift(0,dy); m_trade_sl.Shift(0,dy); m_trade_tp.Shift(0,dy); m_trade_switch.Shift(0,dy);
       m_trade_side_label.Shift(0,dy); m_trade_sl_label.Shift(0,dy); m_trade_tp_label.Shift(0,dy);
       m_trade_estimate.Shift(0,dy); m_trade_budget.Shift(0,dy);
+      m_trade_entry.Shift(0,dy); m_trade_entry_label.Shift(0,dy);
+      m_lot_mode.Shift(0,dy); m_manual_lots.Shift(0,dy);
+      m_lot_mode_label.Shift(0,dy); m_manual_lots_label.Shift(0,dy);
    }
    void OnListToggle()
    {
@@ -610,13 +651,19 @@ private:
    void OnApply()
    {
       CancelPick(); Capture(); Condition candidate[];
-      double sl=0,tp=0;
-      ENUM_ORDER_TYPE side=m_trade_side.Value()==0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double sl=0,tp=0,pendingPrice=0;
+      bool manual=m_lot_mode.Value()==1; double lots=0;
+      ENUM_ORDER_TYPE side=(ENUM_ORDER_TYPE)m_trade_side.Value();
       if(m_trade_draft)
       {
+         if(manual && (!Number(m_manual_lots.Text(),lots) || !ValidManualLots(lots)))
+         { FormMessage="Cannot apply: manual lots must meet broker min/max and step."; UpdateStatus(); return; }
          MqlTick quote;
+         if(PendingOrder(side) && !Number(m_trade_entry.Text(),pendingPrice))
+         { FormMessage="Enter a pending entry price before applying."; UpdateStatus(); return; }
+         pendingPrice=TradePrice(pendingPrice);
          if(!Number(m_trade_sl.Text(),sl) || !Number(m_trade_tp.Text(),tp) ||
-            !SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(side,TradePrice(sl),TradePrice(tp),quote))
+            !SymbolInfoTick(_Symbol,quote) || !ValidEntryPrices(side,TradePrice(sl),TradePrice(tp),quote,pendingPrice))
          { FormMessage="Cannot apply auto entry: enter valid SL/TP on the correct sides of market."; UpdateStatus(); return; }
          sl=TradePrice(sl); tp=TradePrice(tp);
       }
@@ -624,7 +671,9 @@ private:
       if(ArrayResize(conditions,ArraySize(candidate))!=ArraySize(candidate))
       { FormMessage="Not enough memory to start monitoring."; UpdateStatus(); return; }
       for(int i=0;i<ArraySize(candidate);i++) conditions[i]=candidate[i];
-      autoEntry=m_trade_draft; entrySide=side; entrySL=sl; entryTP=tp;
+      autoEntry=m_trade_draft; entrySide=side; entrySL=sl; entryTP=tp; entryPendingPrice=pendingPrice;
+      entryManualLots=manual; entryLots=lots;
+      if(autoEntry && PendingOrder(side)) m_trade_entry.Text(DoubleToString(pendingPrice,_Digits));
       if(autoEntry) { m_trade_sl.Text(DoubleToString(sl,_Digits)); m_trade_tp.Text(DoubleToString(tp,_Digits)); }
       StartMonitoring(); FormMessage="Applied and saved. Monitoring restarted at condition 1.";
       UpdateStatus();
@@ -633,12 +682,18 @@ private:
    {
       CancelPick(); m_trade_draft=!m_trade_draft;
       if(!m_trade_draft) autoEntry=false; // OFF takes effect immediately, including during monitoring.
-      m_trade_switch.Text(m_trade_draft ? "Auto entry ON - 2% equity (Apply to arm)" : "Auto entry OFF - alerts only");
-      FormMessage=m_trade_draft ? "Buy/Sell, SL/TP apply to the full sequence. Apply & Restart arms real/demo orders." :
+      m_trade_switch.Text(m_trade_draft ? "Auto entry ON (Apply to arm)" : "Auto entry OFF - alerts only");
+      FormMessage=m_trade_draft ? "Order type and prices apply to the full sequence. Apply arms real/demo orders." :
                                  "Automatic entry disabled immediately. Alerts remain available.";
       UpdateStatus();
    }
-   void OnTradeEdit() { Dirty(); }
+   void OnTradeEdit()
+   {
+      CancelPick();
+      if(PendingOrder((ENUM_ORDER_TYPE)m_trade_side.Value())) m_trade_entry.Enable(); else m_trade_entry.Disable();
+      if(m_lot_mode.Value()==1) m_manual_lots.Enable(); else m_manual_lots.Disable();
+      Dirty();
+   }
    void OnPause()
    {
       CancelPick();
@@ -659,7 +714,8 @@ private:
    }
    void BeginPick(int field)
    {
-      if(field<0 || field>4) return;
+      if(field<0 || field>5) return;
+      if(field==5 && !PendingOrder((ENUM_ORDER_TYPE)m_trade_side.Value())) return;
       if(field<=2 && (m_selected<0 || m_selected>=ArraySize(draft))) return;
       Capture();
       if(field<=2)
@@ -668,7 +724,7 @@ private:
          if(zone ? field==0 : field!=0) return;
       }
       m_pick_field=field; m_picking=true;
-      string targets[]={"price level","zone low","zone high","stop-loss price","take-profit price"};
+      string targets[]={"price level","zone low","zone high","stop-loss price","take-profit price","pending entry price"};
       string target=targets[field];
       FormMessage="Click the main chart to set "+target+". Esc cancels.";
       UpdateStatus();
@@ -696,13 +752,14 @@ public:
       if(!m_ready || m_minimized) return false;
       // An open dropdown can cover a label; its rows must keep their normal click behavior.
       if(OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-         OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y)) return false;
+         OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y) || OverDropdown(m_lot_mode,x,y)) return false;
       int field=-1;
       if(m_level_label.IsVisible() && m_level_label.Contains(x,y)) field=0;
       else if(m_low_label.IsVisible() && m_low_label.Contains(x,y)) field=1;
       else if(m_high_label.IsVisible() && m_high_label.Contains(x,y)) field=2;
       else if(m_trade_sl_label.IsVisible() && m_trade_sl_label.Contains(x,y)) field=3;
       else if(m_trade_tp_label.IsVisible() && m_trade_tp_label.Contains(x,y)) field=4;
+      else if(m_trade_entry_label.IsVisible() && m_trade_entry_label.Contains(x,y)) field=5;
       if(field<0) return false;
       BeginPick(field); return true;
    }
@@ -715,7 +772,7 @@ public:
    void HandlePointer(int x,int y)
    {
       bool over=Contains(x,y) || OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-                OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y);
+                OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y) || OverDropdown(m_lot_mode,x,y);
       if(over)
       {
          if(!m_scroll_blocked)
@@ -738,51 +795,69 @@ public:
    bool HandleEntryDrag(string name)
    {
       string prefix=m_name+"_DraftEntry_";
-      if(name!=prefix+"SL" && name!=prefix+"TP") return false;
+      if(name!=prefix+"SL" && name!=prefix+"TP" && name!=prefix+"Entry") return false;
+      if(name==prefix+"Entry" && !PendingOrder((ENUM_ORDER_TYPE)m_trade_side.Value())) return true;
       double price=TradePrice(ObjectGetDouble(m_chart_id,name,OBJPROP_PRICE));
       ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTED,false);
       CancelPick();
       if(!MathIsValidNumber(price) || price<=0)
       { FormMessage="SL/TP not changed: price must be positive."; UpdateStatus(); return true; }
       if(name==prefix+"SL") m_trade_sl.Text(DoubleToString(price,_Digits));
-      else m_trade_tp.Text(DoubleToString(price,_Digits));
+      else if(name==prefix+"TP") m_trade_tp.Text(DoubleToString(price,_Digits));
+      else m_trade_entry.Text(DoubleToString(price,_Digits));
       Dirty(); return true;
    }
    void RefreshTradePreview()
    {
       if(!m_ready) return;
-      double sl=0,tp=0;
+      double sl=0,tp=0,pendingPrice=0;
+      ENUM_ORDER_TYPE side=(ENUM_ORDER_TYPE)m_trade_side.Value();
+      bool pending=PendingOrder(side);
+      bool validEntry=Number(m_trade_entry.Text(),pendingPrice) && pendingPrice>0;
+      pendingPrice=TradePrice(pendingPrice);
       bool validSL=Number(m_trade_sl.Text(),sl) && sl>0;
       bool validTP=Number(m_trade_tp.Text(),tp) && tp>0;
       sl=TradePrice(sl); tp=TradePrice(tp);
       string prefix=m_name+"_DraftEntry_";
-      for(int i=0;i<2;i++)
+      for(int i=0;i<3;i++)
       {
-         string name=prefix+(i==0 ? "SL" : "TP");
-         bool valid=i==0 ? validSL && sl>0 : validTP && tp>0;
-         double price=i==0 ? sl : tp;
+         string name=prefix+(i==0 ? "SL" : (i==1 ? "TP" : "Entry"));
+         bool valid=i==0 ? validSL && sl>0 : (i==1 ? validTP && tp>0 : pending && validEntry && pendingPrice>0);
+         double price=i==0 ? sl : (i==1 ? tp : pendingPrice);
          if(!valid) { ObjectDelete(m_chart_id,name); continue; }
          if(ObjectFind(m_chart_id,name)<0 && !ObjectCreate(m_chart_id,name,OBJ_HLINE,0,0,price))
          { Print("Cannot draw SL/TP preview: ",GetLastError()); continue; }
          if(!ObjectGetInteger(m_chart_id,name,OBJPROP_SELECTED)) ObjectSetDouble(m_chart_id,name,OBJPROP_PRICE,price);
-         ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,i==0 ? clrTomato : clrLimeGreen);
+         ObjectSetInteger(m_chart_id,name,OBJPROP_COLOR,i==0 ? clrTomato : (i==1 ? clrLimeGreen : clrDeepSkyBlue));
          ObjectSetInteger(m_chart_id,name,OBJPROP_WIDTH,2);
          ObjectSetInteger(m_chart_id,name,OBJPROP_BACK,true);
          ObjectSetInteger(m_chart_id,name,OBJPROP_SELECTABLE,true);
          ObjectSetInteger(m_chart_id,name,OBJPROP_HIDDEN,true);
-         ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,i==0 ? "Draft stop-loss - double-click, then drag" : "Draft take-profit - double-click, then drag");
+         ObjectSetString(m_chart_id,name,OBJPROP_TOOLTIP,i==0 ? "Draft stop-loss - double-click, then drag" :
+                         (i==1 ? "Draft take-profit - double-click, then drag" : "Draft pending entry - double-click, then drag"));
       }
       string currency=AccountInfoString(ACCOUNT_CURRENCY);
       double budget=AccountInfoDouble(ACCOUNT_EQUITY)*0.02;
       m_trade_budget.Text("Draft estimate | 2% budget: "+DoubleToString(budget,2)+" "+currency+" | excludes fees/gaps");
+      m_trade_budget.Color(clrDimGray);
       string reason="Enter stop-loss and take-profit prices.";
+      bool manual=m_lot_mode.Value()==1; double manualLots=0;
+      bool validLots=!manual || (Number(m_manual_lots.Text(),manualLots) && ValidManualLots(manualLots));
+      if(!validLots) reason="Enter manual lots matching broker min/max and step.";
       MqlTick quote; double volume=0,loss=0,gain=0;
-      ENUM_ORDER_TYPE side=m_trade_side.Value()==0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      if(validSL && validTP && SymbolInfoTick(_Symbol,quote))
+      if(pending && !validEntry) reason="Enter a pending entry price.";
+      if(validSL && validTP && validLots && (!pending || validEntry) && SymbolInfoTick(_Symbol,quote))
       {
-         if(EstimateEntry(side,sl,tp,quote,volume,loss,gain,budget,reason))
+         if(EstimateEntry(side,sl,tp,quote,volume,loss,gain,budget,reason,pendingPrice,manual,manualLots))
+         {
             m_trade_estimate.Text("Lots: "+DoubleToString(volume,8)+" | SL loss: "+DoubleToString(loss,2)+
                                   " | TP gain: "+DoubleToString(gain,2)+" "+currency+" | R: "+DoubleToString(gain/loss,2));
+            double risk=loss/(budget/0.02)*100;
+            bool exceeds=loss>budget;
+            m_trade_budget.Text((exceeds ? "WARNING: " : "Draft risk: ")+DoubleToString(risk,2)+
+                                "%"+(exceeds ? " exceeds 2%" : "")+" | 2% budget: "+DoubleToString(budget,2)+" "+currency);
+            m_trade_budget.Color(exceeds ? clrTomato : clrDimGray);
+         }
          else m_trade_estimate.Text(reason);
       }
       else m_trade_estimate.Text(reason);
@@ -970,6 +1045,7 @@ public:
       else if(m_pick_field==2) draft[m_selected].high=value;
       else if(m_pick_field==3) m_trade_sl.Text(value);
       else if(m_pick_field==4) m_trade_tp.Text(value);
+      else if(m_pick_field==5) m_trade_entry.Text(value);
       CancelPick(); Fields();
       FormMessage="Copied "+value+" into draft. Apply & Restart to use it.";
       UpdateStatus(); return true;
@@ -986,7 +1062,7 @@ public:
       return ScrollDropdown(m_rule,x,y,(int)delta) ||
              ScrollDropdown(m_mode,x,y,(int)delta) ||
              ScrollDropdown(m_timeframe,x,y,(int)delta) ||
-             ScrollDropdown(m_trade_side,x,y,(int)delta) || ScrollList(m_condition,x,y,(int)delta);
+             ScrollDropdown(m_trade_side,x,y,(int)delta) || ScrollDropdown(m_lot_mode,x,y,(int)delta) || ScrollList(m_condition,x,y,(int)delta);
    }
    virtual bool Create(const long chart,const string name,const int subwin,
                        const int x1,const int y1,const int x2,const int y2)
@@ -1014,25 +1090,36 @@ public:
          !Edit(m_low,"Low",200,242,174) ||
          !Edit(m_high,"High",388,242,174) ||
          !Label(m_help,"Help","",12,276,550) ||
-         !Label(m_trade_side_label,"TradeSideLabel","Entry direction",12,302,174) ||
+         !Label(m_trade_side_label,"TradeSideLabel","Order type",12,302,174) ||
          !Label(m_trade_sl_label,"TradeSLLabel","Stop-loss price",200,302,174) ||
          !Label(m_trade_tp_label,"TradeTPLabel","Take-profit price",388,302,174) ||
          !Combo(m_trade_side,"TradeSide",12,324,174) ||
          !Edit(m_trade_sl,"TradeSL",200,324,174) ||
          !Edit(m_trade_tp,"TradeTP",388,324,174) ||
-         !Label(m_trade_estimate,"TradeEstimate","",12,354,550) ||
-         !Label(m_trade_budget,"TradeBudget","",12,377,550) ||
-         !Button(m_trade_switch,"TradeSwitch","Auto entry OFF - alerts only",12,406,550) ||
-         !Button(m_apply,"Apply","Apply & Restart",12,454,270) ||
-         !Button(m_pause,"Pause","Resume & Restart",300,454,262) ||
-         !Label(m_status,"Status","",12,492,550) ||
-         !Label(m_message,"Message","",12,517,550)) return false;
+         !Label(m_trade_entry_label,"TradeEntryLabel","Pending entry price",12,354,174) ||
+         !Edit(m_trade_entry,"TradeEntry",200,350,174) ||
+         !Label(m_lot_mode_label,"LotModeLabel","Lot sizing",12,384,100) ||
+         !Combo(m_lot_mode,"LotMode",112,380,176) ||
+         !Label(m_manual_lots_label,"ManualLotsLabel","Manual lots",300,384,85) ||
+         !Edit(m_manual_lots,"ManualLots",388,380,174) ||
+         !Label(m_trade_estimate,"TradeEstimate","",12,416,550) ||
+         !Label(m_trade_budget,"TradeBudget","",12,439,550) ||
+         !Button(m_trade_switch,"TradeSwitch","Auto entry OFF - alerts only",12,468,550) ||
+         !Button(m_apply,"Apply","Apply & Restart",12,516,270) ||
+         !Button(m_pause,"Pause","Resume & Restart",300,516,262) ||
+         !Label(m_status,"Status","",12,554,550) ||
+         !Label(m_message,"Message","",12,579,550)) return false;
       m_list_expanded=true; Height(Height()+110); m_norm_rect.Height(Height()); ShiftEditor(110);
       m_rule.ListViewItems(6);
       for(int i=0;i<ArraySize(ruleCodes);i++) if(!m_rule.AddItem(ruleNames[i],i)) return false;
       if(!m_mode.AddItem("Live Bid",0) || !m_mode.AddItem("Completed candle",1)) return false;
-      if(!m_trade_side.AddItem("Buy",0) || !m_trade_side.AddItem("Sell",1)) return false;
+      if(!m_trade_side.AddItem("Buy market",ORDER_TYPE_BUY) || !m_trade_side.AddItem("Sell market",ORDER_TYPE_SELL) ||
+         !m_trade_side.AddItem("Buy Limit",ORDER_TYPE_BUY_LIMIT) || !m_trade_side.AddItem("Sell Limit",ORDER_TYPE_SELL_LIMIT) ||
+         !m_trade_side.AddItem("Buy Stop",ORDER_TYPE_BUY_STOP) || !m_trade_side.AddItem("Sell Stop",ORDER_TYPE_SELL_STOP)) return false;
       m_trade_side.Select(0);
+      m_trade_entry.Disable();
+      if(!m_lot_mode.AddItem("Auto (2% risk)",0) || !m_lot_mode.AddItem("Manual lots",1)) return false;
+      m_lot_mode.Select(0); m_manual_lots.Text("0.01"); m_manual_lots.Disable();
       for(int i=0;i<ArraySize(tfValues);i++) if(!m_timeframe.AddItem(tfNames[i],i)) return false;
       m_ready=true; m_selected=0; RefreshList();
       int chartHeight=(int)ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0);
@@ -1047,7 +1134,7 @@ public:
       if(!paused && !finished && ArraySize(conditions)>0)
          status="Monitoring condition "+IntegerToString(active+1)+" / "+IntegerToString(ArraySize(conditions))+": "+conditions[active].rule;
       else if(finished) status="Complete - click Resume & Restart or Apply to rearm";
-      m_status.Text((autoEntry ? "AUTO 2% | " : "ALERTS | ")+status);
+      m_status.Text((autoEntry ? (entryManualLots ? "ENTRY manual lots | " : "ENTRY auto 2% | ") : "ALERTS | ")+status);
       m_message.Text(FormMessage);
       m_pause.Text(paused || finished ? "Resume & Restart" : "Pause");
       DrawZonePreviews();
@@ -1056,10 +1143,13 @@ public:
    virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 };
 EVENT_MAP_BEGIN(CConditionPanel)
+   ON_EVENT(ON_CHANGE,m_lot_mode,OnTradeEdit)
+   ON_EVENT(ON_END_EDIT,m_manual_lots,OnTradeEdit)
    ON_EVENT(ON_CLICK,m_trade_switch,OnTradeSwitch)
    ON_EVENT(ON_CHANGE,m_trade_side,OnTradeEdit)
    ON_EVENT(ON_END_EDIT,m_trade_sl,OnTradeEdit)
    ON_EVENT(ON_END_EDIT,m_trade_tp,OnTradeEdit)
+   ON_EVENT(ON_END_EDIT,m_trade_entry,OnTradeEdit)
    ON_EVENT(ON_CLICK,m_list_toggle,OnListToggle)
    ON_EVENT(ON_CHANGE,m_condition,OnSelect)
    ON_EVENT(ON_CHANGE,m_rule,OnRule)
@@ -1083,7 +1173,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    active=0; finished=false; started=0; previousBid=0; lastTick=0; lastPush=0;
    paused=true; ArrayResize(conditions,0); ArrayResize(draft,0);
-   autoEntry=false; entrySL=0; entryTP=0;
+   autoEntry=false; entrySL=0; entryTP=0; entryPendingPrice=0; entryManualLots=false; entryLots=0;
    entryLock="PCA."+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"."+
              StringSubstr(AccountInfoString(ACCOUNT_SERVER),0,16)+"."+StringSubstr(_Symbol,0,16);
    // Reattaching must reuse the shared lock without resetting another instance's cooldown.
@@ -1116,7 +1206,7 @@ int OnInit()
       }
       else FormMessage="Saved settings could not be loaded. Edit or import a new list.";
    }
-   if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,617) || !panel.Run())
+   if(!panel.Create(ChartID(),"My trading conditions",0,20,30,620,679) || !panel.Run())
    { panel.Destroy(REASON_INITFAILED); return INIT_FAILED; }
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_WHEEL,true);
    ChartSetInteger(ChartID(),CHART_EVENT_MOUSE_MOVE,true);

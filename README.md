@@ -1,6 +1,6 @@
 # MT5 Price Condition Alerts
 
-A MetaTrader 5 Expert Advisor with an on-chart condition editor and optional market entry. Add, remove, reorder and configure conditions inside MT5, then Apply & Restart. Automatic entry defaults OFF; enabling it and applying a Buy/Sell direction, stop-loss and take-profit allows orders on demo or real accounts when the full sequence completes.
+A MetaTrader 5 Expert Advisor with an on-chart condition editor and optional market or pending entry. Add, remove, reorder and configure conditions inside MT5, then Apply & Restart. Automatic entry defaults OFF; enabling it and applying a order type, pending entry price (when applicable), stop-loss and take-profit allows orders on demo or real accounts when the full sequence completes.
 
 ## Files
 
@@ -14,6 +14,6 @@ The panel starts paused and automatically saves applied settings. Draft edits do
 
 Compile the source in MetaEditor to produce the `.ex5` file. Generated binaries, compiler logs, and scratch files are excluded from Git.
 
-Entry sizes use 2% of current equity and the modeled loss to your stop, rounded down to broker volume steps. Orders below the broker minimum are skipped. Automatic entry makes one attempt per arm, checks existing symbol exposure and broker permissions/margin/stops, and does not retry. Entry settings reset on reinitialization. Fees, slippage beyond the configured allowance and gaps can cause actual losses to exceed the modeled risk.
+Buy/Sell market, Buy/Sell Limit and Buy/Sell Stop orders are supported. Pending-order estimates use the planned entry price; orders are placed after full sequence completion. Automatic lot sizes use 2% of current equity and the modeled loss to your stop, rounded down to broker volume steps. Auto sizes below the broker minimum are skipped. Manual lot sizing is also available; risk above 2% shows a red warning but is permitted. Automatic entry makes one attempt per arm, checks existing symbol exposure and broker permissions/margin/stops, and does not retry. Entry settings reset on reinitialization. Fees, slippage beyond the configured allowance and gaps can cause actual losses to exceed the modeled risk.
 
 The source compiles with zero errors and warnings. Native panel interaction, market behaviour and notification delivery still require MT5 demo testing.

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.20"
+#property version "1.21"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -528,6 +528,39 @@ private:
       draft[m_selected].low=Clean(m_low.Text());
       draft[m_selected].high=Clean(m_high.Text());
    }
+   void StyleInput(CEdit &control,bool used)
+   {
+      control.ColorBackground(used ? CONTROLS_EDIT_COLOR_BG : clrGainsboro);
+      control.Color(used ? CONTROLS_EDIT_COLOR : clrGray);
+      control.ColorBorder(used ? CONTROLS_EDIT_COLOR_BORDER : clrSilver);
+   }
+   void StyleCombo(CComboBox &control,bool used)
+   {
+      for(int i=0;i<control.ControlsTotal();i++)
+      {
+         CEdit *edit=dynamic_cast<CEdit *>(control.Control(i));
+         if(edit!=NULL) StyleInput(edit,used);
+      }
+   }
+   void StyleUnusedInputs()
+   {
+      bool available=m_selected>=0 && m_selected<ArraySize(draft);
+      bool zone=false,live=false,candleOnly=false;
+      if(available)
+      { zone=ZoneRule(draft[m_selected].rule); live=draft[m_selected].live; candleOnly=CandleOnly(draft[m_selected].rule); }
+      StyleInput(m_level,available && !zone); StyleInput(m_low,available && zone); StyleInput(m_high,available && zone);
+      m_level_label.Color(available && !zone ? CONTROLS_EDIT_COLOR : clrGray);
+      m_low_label.Color(available && zone ? CONTROLS_EDIT_COLOR : clrGray);
+      m_high_label.Color(available && zone ? CONTROLS_EDIT_COLOR : clrGray);
+      StyleCombo(m_rule,available); StyleCombo(m_mode,available && !candleOnly); StyleCombo(m_timeframe,available && !live);
+      m_rule_label.Color(available ? CONTROLS_EDIT_COLOR : clrGray);
+      m_mode_label.Color(available && !candleOnly ? CONTROLS_EDIT_COLOR : clrGray);
+      m_tf_label.Color(available && !live ? CONTROLS_EDIT_COLOR : clrGray);
+      bool pending=PendingOrder((ENUM_ORDER_TYPE)m_trade_side.Value()),manual=m_lot_mode.Value()==1;
+      StyleInput(m_trade_entry,pending); StyleInput(m_manual_lots,manual);
+      m_trade_entry_label.Color(pending ? CONTROLS_EDIT_COLOR : clrGray);
+      m_manual_lots_label.Color(manual ? CONTROLS_EDIT_COLOR : clrGray);
+   }
    void Fields()
    {
       bool available=m_selected>=0 && m_selected<ArraySize(draft);
@@ -537,7 +570,7 @@ private:
          m_level.Disable(); m_low.Disable(); m_high.Disable();
          m_remove.Disable(); m_up.Disable(); m_down.Disable(); CancelPick();
          m_level.Text(""); m_low.Text(""); m_high.Text("");
-         m_help.Text("Click Add condition to begin."); return;
+         m_help.Text("Click Add condition to begin."); StyleUnusedInputs(); return;
       }
       m_rule.Enable(); m_remove.Enable();
       for(int i=0;i<ArraySize(ruleCodes);i++)
@@ -561,6 +594,7 @@ private:
       if(m_selected>0) m_up.Enable(); else m_up.Disable();
       if(m_selected<ArraySize(draft)-1) m_down.Enable(); else m_down.Disable();
       m_help.Text(draft[m_selected].live ? "Live Bid; no candle-close wait." : "Checks newly completed candles on the selected timeframe.");
+      StyleUnusedInputs();
    }
    void RefreshList()
    {
@@ -692,6 +726,7 @@ private:
       CancelPick();
       if(PendingOrder((ENUM_ORDER_TYPE)m_trade_side.Value())) m_trade_entry.Enable(); else m_trade_entry.Disable();
       if(m_lot_mode.Value()==1) m_manual_lots.Enable(); else m_manual_lots.Disable();
+      StyleUnusedInputs();
       Dirty();
    }
    void OnPause()

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.24"
+#property version "1.26"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -438,6 +438,8 @@ private:
    bool m_trade_draft;
    CComboBox m_rule,m_mode,m_timeframe;
    CButton m_list_toggle;
+   CButton m_zone_toggle,m_level_toggle,m_entry_toggle;
+   bool m_show_zones,m_show_levels,m_show_entry;
    bool m_list_expanded;
    bool m_scroll_blocked,m_previous_scroll;
    bool OverDropdown(CComboBox &combo,int x,int y)
@@ -457,6 +459,30 @@ private:
    bool m_ready;
    bool m_picking;
    int m_pick_field;
+   void UpdateVisibilityButtons()
+   {
+      m_zone_toggle.Text(m_show_zones ? "Hide zones" : "Show zones");
+      m_level_toggle.Text(m_show_levels ? "Hide levels" : "Show levels");
+      m_entry_toggle.Text(m_show_entry ? "Hide entry/SL/TP" : "Show entry/SL/TP");
+   }
+   void OnEntryToggle()
+   {
+      CancelPick(); m_show_entry=!m_show_entry;
+      if(!m_show_entry) ObjectsDeleteAll(m_chart_id,m_name+"_DraftEntry_",0,-1);
+      UpdateVisibilityButtons(); RefreshTradePreview(); ChartRedraw();
+   }
+   void OnZoneToggle()
+   {
+      CancelPick(); m_show_zones=!m_show_zones;
+      if(!m_show_zones) ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
+      UpdateVisibilityButtons(); DrawZonePreviews(); ChartRedraw();
+   }
+   void OnLevelToggle()
+   {
+      CancelPick(); m_show_levels=!m_show_levels;
+      if(!m_show_levels) ObjectsDeleteAll(m_chart_id,m_name+"_DraftLevel_",0,-1);
+      UpdateVisibilityButtons(); DrawLevelPreviews(); ChartRedraw();
+   }
    void ShiftEditor(int dy)
    {
       m_add.Shift(0,dy); m_remove.Shift(0,dy); m_up.Shift(0,dy); m_down.Shift(0,dy);
@@ -812,9 +838,11 @@ public:
       string filename=savedFile+".draft",temporary=filename+".tmp";
       int handle=FileOpen(temporary,FILE_WRITE|FILE_BIN|FILE_UNICODE);
       if(handle==INVALID_HANDLE) { Print("Cannot save draft: ",GetLastError()); return; }
-      bool ok=FileWriteInteger(handle,1)==4 && FileWriteInteger(handle,ArraySize(draft))==4 &&
+      bool ok=FileWriteInteger(handle,3)==4 && FileWriteInteger(handle,ArraySize(draft))==4 &&
               FileWriteInteger(handle,m_selected)==4 && FileWriteInteger(handle,(int)m_trade_side.Value())==4 &&
-              FileWriteInteger(handle,(int)m_lot_mode.Value())==4;
+              FileWriteInteger(handle,(int)m_lot_mode.Value())==4 &&
+              FileWriteInteger(handle,m_show_zones ? 1 : 0)==4 && FileWriteInteger(handle,m_show_levels ? 1 : 0)==4 &&
+              FileWriteInteger(handle,m_show_entry ? 1 : 0)==4;
       ok=ok && WriteDraftText(handle,m_trade_sl.Text()) && WriteDraftText(handle,m_trade_tp.Text()) &&
                WriteDraftText(handle,m_trade_entry.Text()) && WriteDraftText(handle,m_manual_lots.Text());
       for(int i=0;ok && i<ArraySize(draft);i++)
@@ -833,7 +861,21 @@ public:
       bool ok=FileSize(handle)>=20 && FileSize(handle)<=16777216;
       int version=FileReadInteger(handle),count=FileReadInteger(handle),selected=FileReadInteger(handle);
       int side=FileReadInteger(handle),lotMode=FileReadInteger(handle);
-      ok=ok && version==1 && count>=0 && count<=100000 && side>=0 && side<=5 && (lotMode==0 || lotMode==1);
+      ok=ok && (version>=1 && version<=3) && count>=0 && count<=100000 && side>=0 && side<=5 && (lotMode==0 || lotMode==1);
+      int showZones=ShowZonePreviews ? 1 : 0,showLevels=ShowPriceLevelPreviews ? 1 : 0;
+      int showEntry=1;
+      if(ok && version>=2)
+      {
+         ok=FileTell(handle)+8<=FileSize(handle);
+         if(ok) { showZones=FileReadInteger(handle); showLevels=FileReadInteger(handle); }
+         ok=ok && (showZones==0 || showZones==1) && (showLevels==0 || showLevels==1);
+      }
+      if(ok && version>=3)
+      {
+         ok=FileTell(handle)+4<=FileSize(handle);
+         if(ok) showEntry=FileReadInteger(handle);
+         ok=ok && (showEntry==0 || showEntry==1);
+      }
       string sl="",tp="",entry="",lots="";
       ok=ok && ReadDraftText(handle,sl) && ReadDraftText(handle,tp) && ReadDraftText(handle,entry) && ReadDraftText(handle,lots);
       DraftCondition restored[];
@@ -853,6 +895,12 @@ public:
       if(!ok) { Print("Invalid draft snapshot; keeping applied settings."); return; }
       if(ArrayResize(draft,count)!=count) { Print("Not enough memory to restore draft."); return; }
       for(int i=0;i<count;i++) draft[i]=restored[i];
+      m_show_zones=showZones==1; m_show_levels=showLevels==1;
+      m_show_entry=showEntry==1;
+      if(!m_show_entry) ObjectsDeleteAll(m_chart_id,m_name+"_DraftEntry_",0,-1);
+      if(!m_show_zones) ObjectsDeleteAll(m_chart_id,m_name+"_DraftZone_",0,-1);
+      if(!m_show_levels) ObjectsDeleteAll(m_chart_id,m_name+"_DraftLevel_",0,-1);
+      UpdateVisibilityButtons();
       m_selected=selected; m_trade_side.SelectByValue(side); m_lot_mode.SelectByValue(lotMode);
       m_trade_sl.Text(sl); m_trade_tp.Text(tp); m_trade_entry.Text(entry); m_manual_lots.Text(lots);
       if(PendingOrder((ENUM_ORDER_TYPE)side)) m_trade_entry.Enable(); else m_trade_entry.Disable();
@@ -945,7 +993,7 @@ public:
       bool validTP=Number(m_trade_tp.Text(),tp) && tp>0;
       sl=TradePrice(sl); tp=TradePrice(tp);
       string prefix=m_name+"_DraftEntry_";
-      for(int i=0;i<3;i++)
+      for(int i=0;m_show_entry && i<3;i++)
       {
          string name=prefix+(i==0 ? "SL" : (i==1 ? "TP" : "Entry"));
          bool valid=i==0 ? validSL && sl>0 : (i==1 ? validTP && tp>0 : pending && validEntry && pendingPrice>0);
@@ -1008,7 +1056,7 @@ public:
    }
    void DrawLevelPreviews()
    {
-      if(!m_ready || !ShowPriceLevelPreviews) return;
+      if(!m_ready || !m_show_levels) return;
       string prefix=m_name+"_DraftLevel_";
       for(int o=ObjectsTotal(m_chart_id,0,OBJ_HLINE)-1;o>=0;o--)
       {
@@ -1075,7 +1123,7 @@ public:
    {
       RefreshTradePreview();
       DrawLevelPreviews();
-      if(!m_ready || !ShowZonePreviews) return;
+      if(!m_ready || !m_show_zones) return;
       string prefix=m_name+"_DraftZone_";
       int first=(int)ChartGetInteger(m_chart_id,CHART_FIRST_VISIBLE_BAR);
       datetime left=iTime(_Symbol,_Period,MathMax(0,first));
@@ -1194,10 +1242,14 @@ public:
                        const int x1,const int y1,const int x2,const int y2)
    {
       if(!CAppDialog::Create(chart,name,subwin,x1,y1,x2,y2)) return false;
+      m_show_zones=ShowZonePreviews; m_show_levels=ShowPriceLevelPreviews;
+      m_show_entry=true;
       if(!m_condition.TotalView(5) ||
          !m_condition.Create(chart,name+"ConditionList",subwin,12,42,562,144) || !Add(m_condition)) return false;
-      if(!Button(m_list_toggle,"ListToggle","- Hide conditions",12,8,270) ||
-         !Label(m_select_label,"SelectLabel","Click a condition to edit it",300,12,262) ||
+      if(!Button(m_list_toggle,"ListToggle","- Hide conditions",12,8,210) ||
+         !Button(m_zone_toggle,"ZoneToggle","Hide zones",232,8,90) ||
+         !Button(m_level_toggle,"LevelToggle","Hide levels",332,8,90) ||
+         !Button(m_entry_toggle,"EntryToggle","Hide entry/SL/TP",432,8,130) ||
          !Button(m_add,"Add","+ Add",12,66,94) ||
          !Button(m_remove,"Remove","Remove",114,66,94) ||
          !Button(m_up,"Up","Move up",216,66,94) ||
@@ -1248,6 +1300,7 @@ public:
       m_lot_mode.Select(0); m_manual_lots.Text("0.01"); m_manual_lots.Disable();
       for(int i=0;i<ArraySize(tfValues);i++) if(!m_timeframe.AddItem(tfNames[i],i)) return false;
       m_ready=true; m_selected=0; RefreshList();
+      UpdateVisibilityButtons();
       int chartHeight=(int)ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0);
       if(chartHeight>0 && Height()+CONTROLS_BORDER_WIDTH>chartHeight) OnListToggle();
       HandleChartResize();
@@ -1269,6 +1322,9 @@ public:
    virtual bool OnEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 };
 EVENT_MAP_BEGIN(CConditionPanel)
+   ON_EVENT(ON_CLICK,m_entry_toggle,OnEntryToggle)
+   ON_EVENT(ON_CLICK,m_zone_toggle,OnZoneToggle)
+   ON_EVENT(ON_CLICK,m_level_toggle,OnLevelToggle)
    ON_EVENT(ON_CHANGE,m_lot_mode,OnTradeEdit)
    ON_EVENT(ON_END_EDIT,m_manual_lots,OnTradeEdit)
    ON_EVENT(ON_CLICK,m_trade_switch,OnTradeSwitch)

@@ -1,5 +1,5 @@
 ﻿#property strict
-#property version "1.30"
+#property version "1.31"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
@@ -258,7 +258,7 @@ string ruleNames[]={"Enters zone","Is in / touches zone","Trades above level","T
    "Candle closes below","First candle close above","First candle close below","Candle closes in zone"};
 ENUM_TIMEFRAMES tfValues[]={PERIOD_M1,PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
 string tfNames[]={"M1","M5","M15","M30","H1","H4","D1"};
-string FormMessage="Add your conditions, then Apply & Restart. Monitoring is paused.";
+string FormMessage="Add your conditions, then Start. Monitoring is paused.";
 int active=0;
 bool finished=false,aboveSeen=false,belowSeen=false;
 double previousBid=0;
@@ -620,7 +620,7 @@ private:
              control.Text(text) && Add(control);
    }
    void Dirty()
-   { FormMessage="Draft edits only. Apply & Restart resets monitoring to condition 1."; UpdateStatus(); }
+   { FormMessage="Edits are not active yet. Start uses these settings from step 1."; UpdateStatus(); }
    void Capture()
    {
       if(m_selected<0 || m_selected>=ArraySize(draft)) return;
@@ -709,7 +709,7 @@ private:
       if(count==0)
       {
          m_selected=-1;
-         m_condition.AddItem("No conditions - click Add",-1); m_condition.Select(0);
+         m_condition.AddItem("No conditions - add one, or place an order now",-1); m_condition.Select(0);
          m_condition.Disable();
       }
       else
@@ -816,7 +816,7 @@ private:
       entryManualLots=manual; entryLots=lots;
       if(autoEntry && PendingOrder(side)) m_trade_entry.Text(DoubleToString(pendingPrice,_Digits));
       if(autoEntry) { m_trade_sl.Text(DoubleToString(sl,_Digits)); m_trade_tp.Text(DoubleToString(tp,_Digits)); }
-      StartMonitoring(); FormMessage="Applied and saved. Monitoring restarted at condition 1.";
+      StartMonitoring(); FormMessage="Settings saved. Watching condition 1.";
       if(ArraySize(conditions)==0)
       {
          finished=true;
@@ -829,8 +829,8 @@ private:
    {
       CancelPick(); m_trade_draft=!m_trade_draft;
       if(!m_trade_draft) autoEntry=false; // OFF takes effect immediately, including during monitoring.
-      m_trade_switch.Text(m_trade_draft ? "Auto entry ON (Apply to arm)" : "Auto entry OFF - alerts only");
-      FormMessage=m_trade_draft ? "Order type and prices apply to the full sequence. Apply arms real/demo orders." :
+      m_trade_switch.Text(m_trade_draft ? "Auto entry ON (Apply to arm)" : "Mode: alerts only");
+      FormMessage=m_trade_draft ? "Click Arm automatic entry to start. No conditions: Place order now." :
                                  "Automatic entry disabled immediately. Alerts remain available.";
       UpdateStatus();
    }
@@ -845,16 +845,8 @@ private:
    void OnPause()
    {
       CancelPick();
-      if(!paused && !finished)
-      { paused=true; FormMessage="Paused. Resume restarts at condition 1; missed prices are not replayed."; }
-      else if(ArraySize(conditions)>0)
-      { StartMonitoring(); FormMessage="Monitoring restarted with the applied list. Draft edits are not applied."; }
-      else if(autoEntry)
-      {
-         finished=true; paused=false;
-         ExecuteEntry(); // Explicit rearm only; never repeat on ticks.
-      }
-      else FormMessage="No conditions. Enable auto entry and Apply to place an order.";
+      paused=true; autoEntry=false;
+      FormMessage="Stopped. Existing orders stay open. Use Start to begin again.";
       UpdateStatus();
    }
    void OnImport()
@@ -863,7 +855,7 @@ private:
       Condition imported[];
       if(!LoadConditions(ConditionsFile,imported)) { UpdateStatus(); return; }
       CopyToDraft(imported); m_selected=0;
-      FormMessage="Imported into draft. Review, then Apply & Restart."; RefreshList();
+      FormMessage="Imported into draft. Review, then Start."; RefreshList();
    }
    void BeginPick(int field)
    {
@@ -963,7 +955,7 @@ public:
       if(PendingOrder((ENUM_ORDER_TYPE)side)) m_trade_entry.Enable(); else m_trade_entry.Disable();
       if(lotMode==1) m_manual_lots.Enable(); else m_manual_lots.Disable();
       m_trade_draft=false; autoEntry=false;
-      FormMessage="Draft restored. Review then Apply & Restart. Auto entry OFF.";
+      FormMessage="Draft restored. Review then Start. Auto entry OFF.";
       RefreshList();
    }
    void HandleChartResize()
@@ -1278,7 +1270,7 @@ public:
       else if(m_pick_field==4) m_trade_tp.Text(value);
       else if(m_pick_field==5) m_trade_entry.Text(value);
       CancelPick(); Fields();
-      FormMessage="Copied "+value+" into draft. Apply & Restart to use it.";
+      FormMessage="Copied "+value+" into draft. Start to use it.";
       UpdateStatus(); return true;
    }
    bool HandleEscape()
@@ -1339,9 +1331,9 @@ public:
          !Edit(m_manual_lots,"ManualLots",388,380,174) ||
          !Label(m_trade_estimate,"TradeEstimate","",12,416,550) ||
          !Label(m_trade_budget,"TradeBudget","",12,439,550) ||
-         !Button(m_trade_switch,"TradeSwitch","Auto entry OFF - alerts only",12,468,550) ||
-         !Button(m_apply,"Apply","Apply & Restart",12,516,270) ||
-         !Button(m_pause,"Pause","Resume & Restart",300,516,262) ||
+         !Button(m_trade_switch,"TradeSwitch","Mode: alerts only",12,468,550) ||
+         !Button(m_apply,"Apply","Start",12,516,270) ||
+         !Button(m_pause,"Pause","Stop monitoring",300,516,262) ||
          !Label(m_status,"Status","",12,554,550) ||
          !Label(m_message,"Message","",12,579,550)) return false;
       m_list_expanded=true; Height(Height()+110); m_norm_rect.Height(Height()); ShiftEditor(110);
@@ -1366,13 +1358,16 @@ public:
    void UpdateStatus()
    {
       if(!m_ready) return;
-      string status="Paused";
+      string status="STOPPED - no conditions being checked";
       if(!paused && !finished && ArraySize(conditions)>0)
-         status="Monitoring condition "+IntegerToString(active+1)+" / "+IntegerToString(ArraySize(conditions))+": "+conditions[active].rule;
-      else if(finished) status="Complete - click Resume & Restart or Apply to rearm";
-      m_status.Text((autoEntry ? (entryManualLots ? "ENTRY manual lots | " : "ENTRY auto 2% | ") : "ALERTS | ")+status);
+         status=(autoEntry ? "ORDER ARMED" : "ALERTS RUNNING")+" - step "+
+                IntegerToString(active+1)+" of "+IntegerToString(ArraySize(conditions));
+      else if(finished && !paused) status="FINISHED - monitoring stopped";
+      m_status.Text(status);
       m_message.Text(FormMessage);
-      m_pause.Text(paused || finished ? "Resume & Restart" : "Pause");
+      m_apply.Text(m_trade_draft ? (ArraySize(draft)==0 ? "Place order now" : "Arm automatic entry") : "Start alerts");
+      m_pause.Text("Stop monitoring");
+      m_trade_switch.Text(m_trade_draft ? "Mode: automatic entry" : "Mode: alerts only");
       DrawZonePreviews();
       ChartRedraw();
    }
@@ -1441,7 +1436,7 @@ int OnInit()
          ArrayResize(conditions,ArraySize(saved));
          for(int i=0;i<ArraySize(saved);i++) conditions[i]=saved[i];
          CopyToDraft(saved);
-         FormMessage="Saved list restored. Click Resume & Restart when ready.";
+         FormMessage="Saved list restored. Click Start when ready.";
       }
       else FormMessage="Saved settings could not be loaded. Edit or import a new list.";
    }

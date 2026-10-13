@@ -1,12 +1,11 @@
 ﻿#property strict
-#property version "1.31"
+#property version "1.32"
 #property description "Ordered conditions with optional market/pending entry and 2% equity risk."
 #include <Controls\Dialog.mqh>
 #include <Controls\ComboBox.mqh>
 #include <Controls\Button.mqh>
 #include <Controls\Edit.mqh>
 #include <Controls\Label.mqh>
-input string ConditionsFile="conditions.csv"; // Optional import, not required on startup
 input bool PopupAlerts=true;
 input bool PhoneNotifications=false;
 input bool OneShot=true;
@@ -494,7 +493,7 @@ private:
       return false;
    }
    CEdit m_level,m_low,m_high;
-   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause,m_import;
+   CButton m_add,m_remove,m_up,m_down,m_apply,m_pause;
    CLabel m_select_label,m_rule_label,m_mode_label,m_tf_label;
    CLabel m_level_label,m_low_label,m_high_label,m_help,m_status,m_message;
    int m_selected;
@@ -546,7 +545,7 @@ private:
    void ShiftEditor(int dy)
    {
       m_add.Shift(0,dy); m_remove.Shift(0,dy); m_up.Shift(0,dy); m_down.Shift(0,dy);
-      m_import.Shift(0,dy); m_rule_label.Shift(0,dy); m_rule.Shift(0,dy);
+      m_rule_label.Shift(0,dy); m_rule.Shift(0,dy);
       m_mode_label.Shift(0,dy); m_tf_label.Shift(0,dy); m_mode.Shift(0,dy); m_timeframe.Shift(0,dy);
       m_level_label.Shift(0,dy); m_low_label.Shift(0,dy); m_high_label.Shift(0,dy);
       m_level.Shift(0,dy); m_low.Shift(0,dy); m_high.Shift(0,dy); m_help.Shift(0,dy);
@@ -863,14 +862,6 @@ private:
       paused=true; autoEntry=false;
       FormMessage="Stopped. Existing orders stay open. Use Start to begin again.";
       UpdateStatus();
-   }
-   void OnImport()
-   {
-      CancelPick();
-      Condition imported[];
-      if(!LoadConditions(ConditionsFile,imported)) { UpdateStatus(); return; }
-      CopyToDraft(imported); m_selected=0;
-      FormMessage="Imported into draft. Review, then Start."; RefreshList();
    }
    void BeginPick(int field)
    {
@@ -1309,7 +1300,6 @@ public:
          !Button(m_remove,"Remove","Remove",114,66,94) ||
          !Button(m_up,"Up","Move up",216,66,94) ||
          !Button(m_down,"Down","Move down",318,66,104) ||
-         !Button(m_import,"Import","Import CSV",430,66,132) ||
          !Label(m_rule_label,"RuleLabel","Rule",12,108,320) ||
          !Combo(m_rule,"Rule",12,130,550) ||
          !Label(m_mode_label,"ModeLabel","Evaluate",12,164,250) ||
@@ -1404,7 +1394,6 @@ EVENT_MAP_BEGIN(CConditionPanel)
    ON_EVENT(ON_CLICK,m_down,OnDown)
    ON_EVENT(ON_CLICK,m_apply,OnApply)
    ON_EVENT(ON_CLICK,m_pause,OnPause)
-   ON_EVENT(ON_CLICK,m_import,OnImport)
 EVENT_MAP_END(CAppDialog)
 CConditionPanel panel;
 int OnInit()

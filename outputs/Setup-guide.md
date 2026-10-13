@@ -118,3 +118,5 @@ Version 1.30 identifies which entry permission check failed: server connection, 
 ## Simplified panel (v1.31)
 
 The Mode button switches between alerts only and automatic entry. The main action reads Start alerts in alerts mode, Arm automatic entry when there are conditions, and Place order now for automatic entry with an empty list. It always saves and starts with the current edited settings from step 1. Stop monitoring stops monitoring and disables future automatic entries; it never starts or retries. Existing positions and pending orders are unchanged. Status shows STOPPED, ALERTS RUNNING, ORDER ARMED or FINISHED. This replaces the previous Apply/Resume workflow. Changing mode alone does not start monitoring or place an order. Compile check: zero errors/warnings. Verify the revised buttons on a demo chart; no orders were sent during development.
+
+Version 1.32 removes the Import CSV button and ConditionsFile input. Create and edit conditions directly in the panel. Automatic saving/restoring still uses the existing internal files; earlier manual CSV import instructions no longer apply. Compilation passed with zero errors/warnings.

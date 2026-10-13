@@ -44,6 +44,10 @@ ENUM_ORDER_TYPE ResolvePendingSide(ENUM_ORDER_TYPE side,double price,MqlTick &qu
    if(BuyOrder(side)) return price<quote.ask ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_BUY_STOP;
    return price>quote.bid ? ORDER_TYPE_SELL_LIMIT : ORDER_TYPE_SELL_STOP;
 }
+double PlannedEntryPrice(ENUM_ORDER_TYPE side,MqlTick &quote,double pendingPrice)
+{
+   return PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid);
+}
 bool ValidPlannedPrices(ENUM_ORDER_TYPE side,double entry,double sl,double tp)
 {
    if(!MathIsValidNumber(entry) || !MathIsValidNumber(sl) || !MathIsValidNumber(tp) ||
@@ -91,12 +95,11 @@ bool EstimateEntry(ENUM_ORDER_TYPE side,double sl,double tp,MqlTick &quote,
                    bool manual=false,double manualLots=0)
 {
    volume=0; loss=0; gain=0; budget=AccountInfoDouble(ACCOUNT_EQUITY)*0.02;
-   double planned=PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid);
-   if(!ValidPlannedPrices(side,planned,sl,tp)) { reason="SL/TP must be on the correct sides of entry."; return false; }
+   double entry=PlannedEntryPrice(side,quote,pendingPrice);
+   if(!ValidPlannedPrices(side,entry,sl,tp)) { reason="SL/TP must be on the correct sides of entry."; return false; }
    double minimum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    double maximum=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    ENUM_ORDER_TYPE marketSide=BuyOrder(side) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double entry=PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid);
    // Convert the unsigned input before applying a negative Sell direction.
    double allowance=(double)EntryDeviationPoints*_Point;
    double adverse=BuyOrder(side) ? entry+allowance : entry-allowance;
@@ -182,7 +185,7 @@ void ExecuteEntry()
    if(EntryMaxSpreadPoints>0 && (quote.ask-quote.bid)/_Point>EntryMaxSpreadPoints)
    { FormMessage="Entry skipped: spread exceeds the configured limit."; return; }
    bool pending=PendingOrder(entrySide);
-   double entry=pending ? entryPendingPrice : (BuyOrder(entrySide) ? quote.ask : quote.bid);
+   double entry=PlannedEntryPrice(entrySide,quote,entryPendingPrice);
    double volume=0,loss=0,gain=0,budget=0; string reason="";
    if(!EstimateEntry(entrySide,entrySL,entryTP,quote,volume,loss,gain,budget,reason,entryPendingPrice,entryManualLots,entryLots))
    { FormMessage="Entry skipped: "+reason; return; }
@@ -286,15 +289,9 @@ bool Number(string value,double &result)
 }
 bool Timeframe(string value,ENUM_TIMEFRAMES &tf)
 {
-   if(value=="M1") tf=PERIOD_M1;
-   else if(value=="M5") tf=PERIOD_M5;
-   else if(value=="M15") tf=PERIOD_M15;
-   else if(value=="M30") tf=PERIOD_M30;
-   else if(value=="H1") tf=PERIOD_H1;
-   else if(value=="H4") tf=PERIOD_H4;
-   else if(value=="D1") tf=PERIOD_D1;
-   else return false;
-   return true;
+   for(int i=0;i<ArraySize(tfNames);i++)
+      if(value==tfNames[i]) { tf=tfValues[i]; return true; }
+   return false;
 }
 bool ZoneRule(string rule)
 {
@@ -504,6 +501,24 @@ private:
    bool m_ready;
    bool m_picking;
    int m_pick_field;
+   bool OverAnyDropdown(int x,int y)
+   {
+      return OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
+             OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y) ||
+             OverDropdown(m_lot_mode,x,y);
+   }
+   void SetPriceField(int field,string value)
+   {
+      switch(field)
+      {
+         case 0: draft[m_selected].level=value; break;
+         case 1: draft[m_selected].low=value; break;
+         case 2: draft[m_selected].high=value; break;
+         case 3: m_trade_sl.Text(value); break;
+         case 4: m_trade_tp.Text(value); break;
+         case 5: m_trade_entry.Text(value); break;
+      }
+   }
    void UpdateVisibilityButtons()
    {
       m_zone_toggle.Text(m_show_zones ? "Hide zones" : "Show zones");
@@ -804,7 +819,7 @@ private:
          pendingPrice=TradePrice(pendingPrice);
          if(!Number(m_trade_sl.Text(),sl) || !Number(m_trade_tp.Text(),tp) ||
             (!PendingOrder(side) && !SymbolInfoTick(_Symbol,quote)) ||
-            !ValidPlannedPrices(side,PendingOrder(side) ? pendingPrice : (BuyOrder(side) ? quote.ask : quote.bid),TradePrice(sl),TradePrice(tp)))
+            !ValidPlannedPrices(side,PlannedEntryPrice(side,quote,pendingPrice),TradePrice(sl),TradePrice(tp)))
          { FormMessage="Cannot apply auto entry: enter valid SL/TP on the correct sides of entry."; UpdateStatus(); return; }
          sl=TradePrice(sl); tp=TradePrice(tp);
       }
@@ -974,8 +989,7 @@ public:
    {
       if(!m_ready || m_minimized) return false;
       // An open dropdown can cover a label; its rows must keep their normal click behavior.
-      if(OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-         OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y) || OverDropdown(m_lot_mode,x,y)) return false;
+      if(OverAnyDropdown(x,y)) return false;
       int field=-1;
       if(m_level_label.IsVisible() && m_level_label.Contains(x,y)) field=0;
       else if(m_low_label.IsVisible() && m_low_label.Contains(x,y)) field=1;
@@ -994,8 +1008,7 @@ public:
    }
    void HandlePointer(int x,int y)
    {
-      bool over=Contains(x,y) || OverDropdown(m_rule,x,y) || OverDropdown(m_mode,x,y) ||
-                OverDropdown(m_timeframe,x,y) || OverDropdown(m_trade_side,x,y) || OverDropdown(m_lot_mode,x,y);
+      bool over=Contains(x,y) || OverAnyDropdown(x,y);
       if(over)
       {
          if(!m_scroll_blocked)
@@ -1025,9 +1038,7 @@ public:
       CancelPick();
       if(!MathIsValidNumber(price) || price<=0)
       { FormMessage="SL/TP not changed: price must be positive."; UpdateStatus(); return true; }
-      if(name==prefix+"SL") m_trade_sl.Text(DoubleToString(price,_Digits));
-      else if(name==prefix+"TP") m_trade_tp.Text(DoubleToString(price,_Digits));
-      else m_trade_entry.Text(DoubleToString(price,_Digits));
+      SetPriceField(name==prefix+"SL" ? 3 : (name==prefix+"TP" ? 4 : 5),DoubleToString(price,_Digits));
       Dirty(); return true;
    }
    void RefreshTradePreview()
@@ -1263,12 +1274,7 @@ public:
       if(price<=0) return true;
       string value=DoubleToString(price,_Digits);
       Capture();
-      if(m_pick_field==0) draft[m_selected].level=value;
-      else if(m_pick_field==1) draft[m_selected].low=value;
-      else if(m_pick_field==2) draft[m_selected].high=value;
-      else if(m_pick_field==3) m_trade_sl.Text(value);
-      else if(m_pick_field==4) m_trade_tp.Text(value);
-      else if(m_pick_field==5) m_trade_entry.Text(value);
+      SetPriceField(m_pick_field,value);
       CancelPick(); Fields();
       FormMessage="Copied "+value+" into draft. Start to use it.";
       UpdateStatus(); return true;
